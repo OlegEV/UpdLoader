@@ -1,0 +1,68 @@
+services:
+  upd-telegram-bot:
+    build: .
+    container_name: upd-telegram-bot
+    restart: unless-stopped
+    
+    # Переменные окружения из .env файла
+    env_file:
+      - .env
+    
+    # Монтируем директории для логов и временных файлов
+    volumes:
+      - ./logs:/app/logs
+      - ./temp:/app/temp
+      - ./data:/app/data  # Для дополнительных данных если потребуется
+    
+    # Настройки логирования Docker
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Политика перезапуска
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+    
+    # Проверка здоровья контейнера
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Опциональный сервис для мониторинга логов
+  log-viewer:
+    image: amir20/dozzle:latest
+    container_name: upd-bot-logs
+    restart: unless-stopped
+    ports:
+      - "9999:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      DOZZLE_LEVEL: info
+      DOZZLE_TAILSIZE: 300
+    profiles:
+      - monitoring
+
+# Создаем именованные тома для постоянного хранения
+volumes:
+  bot_logs:
+    driver: local
+  bot_temp:
+    driver: local
+  bot_data:
+    driver: local
+
+# Создаем сеть для изоляции
+networks:
+  default:
+    name: upd-bot-network
+    driver: bridge
