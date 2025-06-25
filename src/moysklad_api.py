@@ -400,40 +400,65 @@ class MoySkladAPI:
             logger.info(f"Найден счет покупателя: {customer_invoice['name']}")
             logger.debug(f"Структура счета: {list(customer_invoice.keys())}")
             
-            # В счетах покупателя (invoicein) может не быть поля store
+            # В счетах поставщика (invoiceout) ищем склад
             # Попробуем разные варианты получения склада
             store = customer_invoice.get('store')
             if not store:
                 # Возможно склад в другом поле
                 store = customer_invoice.get('warehouse')
-            if not store:
-                # Возможно нужно получить склад из связанных документов
-                logger.warning("В счете покупателя не найдено поле store/warehouse")
-                logger.debug("Доступные поля в счете: " + ", ".join(customer_invoice.keys()))
+            
+            logger.debug(f"Найденный объект склада: {store}")
+            logger.debug("Доступные поля в счете: " + ", ".join(customer_invoice.keys()))
             
             if store:
-                logger.info(f"Склад из счета: {store.get('name', 'без названия')} (ID: {store.get('id', 'нет ID')})")
+                # Проверяем структуру объекта склада
+                if isinstance(store, dict):
+                    store_name = store.get('name', 'без названия')
+                    store_id = store.get('id', 'нет ID')
+                    
+                    # Если нет прямых полей name/id, возможно это мета-ссылка
+                    if store_name == 'без названия' and 'meta' in store:
+                        # Получаем полную информацию о складе
+                        try:
+                            store_url = store['meta']['href']
+                            store_response = self._make_request('GET', store_url)
+                            if store_response.status_code == 200:
+                                store_data = store_response.json()
+                                store_name = store_data.get('name', 'без названия')
+                                store_id = store_data.get('id', 'нет ID')
+                                # Обновляем объект склада полными данными
+                                store = store_data
+                                logger.debug(f"Получена полная информация о складе: {store_name} (ID: {store_id})")
+                        except Exception as e:
+                            logger.error(f"Ошибка получения информации о складе: {e}")
+                    
+                    logger.info(f"Склад из счета: {store_name} (ID: {store_id})")
+                    
+                    # Проверяем что у нас есть корректные данные склада
+                    if not store.get('meta') and not store.get('id'):
+                        logger.error("Объект склада не содержит необходимых мета-данных")
+                        raise MoySkladAPIError(
+                            f"В найденном счете покупателя '{customer_invoice['name']}' склад указан некорректно.\n"
+                            f"Проверьте настройки склада в счете и повторите попытку."
+                        )
+                else:
+                    logger.error(f"Неожиданный тип объекта склада: {type(store)}")
+                    raise MoySkladAPIError(
+                        f"В найденном счете покупателя '{customer_invoice['name']}' склад указан в неожиданном формате.\n"
+                        f"Обратитесь к администратору системы."
+                    )
             else:
-                logger.warning("В найденном счете не указан склад")
-        else:
-            logger.warning(f"Счет покупателя с номером {content.requisite_number} не найден")
-        
-        if not store:
-            # Fallback: ищем склад по умолчанию
-            logger.info("Используем склад по умолчанию")
-            store = self._get_default_store()
-        
-        if not store:
-            # Fallback: используем склад по умолчанию
-            store = self._get_default_store()
-            if store:
-                logger.info(f"Используется склад по умолчанию: {store.get('name', 'без названия')} (ID: {store.get('id', 'нет ID')})")
-            else:
-                logger.error("Склад по умолчанию не найден")
+                logger.error("В найденном счете не указан склад")
                 raise MoySkladAPIError(
-                    "Не найден склад для создания отгрузки.\n"
-                    "Создайте хотя бы один склад в МойСклад и повторите попытку."
+                    f"В найденном счете покупателя '{customer_invoice['name']}' не указан склад.\n"
+                    f"Укажите склад в счете и повторите попытку."
                 )
+        else:
+            logger.error(f"Счет покупателя с номером {content.requisite_number} не найден")
+            raise MoySkladAPIError(
+                f"Счет покупателя с номером '{content.requisite_number}' не найден.\n"
+                f"Создайте счет с указанным номером и повторите попытку."
+            )
         
         logger.info(f"Итоговый склад для отгрузки: {store.get('name', 'без названия')} (ID: {store.get('id', 'нет ID')})")
         
@@ -464,7 +489,7 @@ class MoySkladAPI:
             ]
         
         # Добавляем позиции (используем ту же логику что и для счета-фактуры)
-        positions = self._create_positions_from_upd(content)
+        positions = self._create_positions_from_upd(content, customer_invoice)
         demand_data["positions"] = positions
         
         # Создаем отгрузку
@@ -512,23 +537,98 @@ class MoySkladAPI:
         logger.debug(f"Создаю счет-фактуру: {invoice_data['name']} на основе отгрузки {demand['id']}")
         
         # Добавляем позиции (используем ту же логику что и для отгрузки)
-        positions = self._create_positions_from_upd(content)
+        # Нужно найти счет покупателя для получения цен
+        customer_invoice = self._find_customer_invoice(content.requisite_number, None)
+        positions = self._create_positions_from_upd(content, customer_invoice)
         invoice_data["positions"] = positions
         
         logger.debug(f"Итоговые данные счета-фактуры: позиций={len(invoice_data['positions'])}")
         
         return invoice_data
     
-    def _create_positions_from_upd(self, content: UPDContent) -> List[Dict]:
-        """Создание позиций документа из УПД"""
+    def _create_positions_from_upd(self, content: UPDContent, customer_invoice: Optional[Dict] = None) -> List[Dict]:
+        """Создание позиций документа из УПД с использованием цен из счета"""
         positions = []
         missing_items = []
         
+        # Получаем позиции из счета для сопоставления цен
+        invoice_positions = {}
+        if customer_invoice:
+            # Получаем полную информацию о счете с позициями
+            try:
+                invoice_url = customer_invoice['meta']['href']
+                invoice_response = self._make_request('GET', invoice_url + '?expand=positions.assortment')
+                if invoice_response.status_code == 200:
+                    invoice_data = invoice_response.json()
+                    logger.debug(f"Структура счета: {list(invoice_data.keys())}")
+                    logger.debug(f"Полная структура счета: {invoice_data}")
+                    
+                    # Проверяем разные варианты структуры позиций
+                    positions_data = None
+                    if 'positions' in invoice_data:
+                        positions_data = invoice_data['positions']
+                        logger.debug(f"Тип positions: {type(positions_data)}")
+                        logger.debug(f"Содержимое positions: {positions_data}")
+                        
+                        if isinstance(positions_data, dict):
+                            if 'rows' in positions_data:
+                                positions_data = positions_data['rows']
+                                logger.debug(f"Используем positions.rows, найдено: {len(positions_data)}")
+                            elif 'meta' in positions_data and 'href' in positions_data['meta']:
+                                # Позиции нужно загрузить отдельно
+                                logger.debug("Позиции нужно загрузить отдельно по ссылке")
+                                positions_url = positions_data['meta']['href']
+                                positions_response = self._make_request('GET', positions_url)
+                                if positions_response.status_code == 200:
+                                    positions_result = positions_response.json()
+                                    positions_data = positions_result.get('rows', [])
+                                    logger.debug(f"Загружено позиций по ссылке: {len(positions_data)}")
+                                else:
+                                    logger.error(f"Ошибка загрузки позиций по ссылке: {positions_response.status_code}")
+                                    positions_data = []
+                            else:
+                                logger.warning(f"Неожиданная структура positions dict: {list(positions_data.keys())}")
+                                positions_data = []
+                        elif isinstance(positions_data, list):
+                            # positions уже список
+                            logger.debug(f"Positions уже список, найдено: {len(positions_data)}")
+                        else:
+                            logger.warning(f"Неожиданная структура positions: {type(positions_data)}")
+                            positions_data = []
+                    else:
+                        logger.warning("Поле 'positions' не найдено в счете")
+                        positions_data = []
+                    
+                    logger.debug(f"Итого найдено позиций в счете: {len(positions_data) if positions_data else 0}")
+                    
+                    if positions_data:
+                        for i, pos in enumerate(positions_data):
+                            logger.debug(f"Обрабатываю позицию {i+1}: {list(pos.keys()) if isinstance(pos, dict) else type(pos)}")
+                            logger.debug(f"Полное содержимое позиции {i+1}: {pos}")
+                            
+                            assortment = pos.get('assortment', {})
+                            if assortment:
+                                # Создаем ключи для поиска по артикулу и названию
+                                product_name = assortment.get('name', '')
+                                product_article = assortment.get('article', '')
+                                price = pos.get('price', 0)
+                                logger.debug(f"Товар: {product_name}, артикул: {product_article}, цена: {price}")
+                                
+                                if product_article:
+                                    invoice_positions[f"article:{product_article}"] = price
+                                if product_name:
+                                    invoice_positions[f"name:{product_name}"] = price
+                            else:
+                                logger.warning(f"В позиции {i+1} не найдено поле assortment")
+                    
+                    logger.info(f"Загружено {len(invoice_positions)} позиций из счета для сопоставления цен")
+                    if invoice_positions:
+                        logger.debug(f"Ключи позиций: {list(invoice_positions.keys())}")
+            except Exception as e:
+                logger.error(f"Ошибка получения позиций из счета: {e}")
+        
         # Добавляем позиции из УПД
         for item in content.items:
-            # МойСклад требует цену в копейках (умножаем на 100)
-            price_kopecks = int(float(item.price) * 100)
-            
             # Ищем товар по артикулу, если есть
             product = None
             if item.article:
@@ -549,6 +649,24 @@ class MoySkladAPI:
                     logger.warning(f"❌ Товар не найден по названию: {item.name}")
             
             if product:
+                # Определяем цену: сначала из счета, потом из УПД
+                price_kopecks = int(float(item.price) * 100)  # Цена из УПД по умолчанию
+                
+                # Ищем цену в счете по артикулу
+                if item.article and f"article:{item.article}" in invoice_positions:
+                    invoice_price = invoice_positions[f"article:{item.article}"]
+                    if invoice_price > 0:
+                        price_kopecks = invoice_price
+                        logger.info(f"Использую цену из счета по артикулу {item.article}: {price_kopecks/100:.2f} руб")
+                # Если не найдено по артикулу, ищем по названию
+                elif f"name:{item.name}" in invoice_positions:
+                    invoice_price = invoice_positions[f"name:{item.name}"]
+                    if invoice_price > 0:
+                        price_kopecks = invoice_price
+                        logger.info(f"Использую цену из счета по названию '{item.name}': {price_kopecks/100:.2f} руб")
+                else:
+                    logger.warning(f"Цена для товара '{item.name}' не найдена в счете, использую цену из УПД: {price_kopecks/100:.2f} руб")
+                
                 position = {
                     "quantity": float(item.quantity),
                     "price": price_kopecks,
@@ -802,21 +920,3 @@ class MoySkladAPI:
             logger.error(f"Ошибка поиска счета по номеру {requisite_number}: {e}")
             return None
     
-    def _get_default_store(self) -> Optional[Dict]:
-        """Получение склада по умолчанию"""
-        try:
-            search_url = f"{self.base_url}/entity/store"
-            response = self._make_request('GET', search_url)
-            
-            if response.status_code == 200:
-                stores = response.json().get("rows", [])
-                if stores:
-                    logger.debug(f"Использую склад по умолчанию: {stores[0]['name']}")
-                    return stores[0]
-            
-            logger.warning("В МойСклад нет доступных складов")
-            return None
-                
-        except Exception as e:
-            logger.error(f"Ошибка получения складов: {e}")
-            return None
