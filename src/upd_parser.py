@@ -436,9 +436,9 @@ class UPDParser:
             
             if seller_elem is None:
                 logger.warning("Элемент СвПрод не найден")
-                return Organization(name="Не указано", inn="0000000000")
+                raise UPDParsingError("Не удалось определить продавца в УПД документе")
             
-            # В УПД 5.03 структура: СвПрод/ИдСв/СвЮЛУч
+            # Сначала пробуем найти юридическое лицо (СвЮЛУч)
             legal_entity = None
             if namespaces:
                 legal_entity = seller_elem.find(".//ns:ИдСв/ns:СвЮЛУч", namespaces)
@@ -452,47 +452,105 @@ class UPDParser:
                 if legal_entity is None:
                     legal_entity = seller_elem.find(".//СвЮЛУч")
             
-            if legal_entity is None:
-                logger.warning("Элемент СвЮЛУч не найден в СвПрод")
-                return Organization(name="Не указано", inn="0000000000")
-            
-            # В УПД 5.03 данные находятся в атрибутах элемента СвЮЛУч
-            name = legal_entity.get("НаимОрг") or "Не указано"
-            inn = legal_entity.get("ИННЮЛ") or "0000000000"
-            kpp = legal_entity.get("КПП")
-            
-            # Fallback: если в атрибутах нет данных, ищем в дочерних элементах
-            if name == "Не указано" or inn == "0000000000":
-                name_elem = None
-                inn_elem = None
-                kpp_elem = None
+            # Если найдено юридическое лицо, парсим его данные
+            if legal_entity is not None:
+                logger.debug("Найдено юридическое лицо продавца")
                 
+                # В УПД 5.03 данные находятся в атрибутах элемента СвЮЛУч
+                name = legal_entity.get("НаимОрг") or "Не указано"
+                inn = legal_entity.get("ИННЮЛ") or None
+                kpp = legal_entity.get("КПП")
+                
+                # Fallback: если в атрибутах нет данных, ищем в дочерних элементах
+                if name == "Не указано" or inn is None:
+                    name_elem = None
+                    inn_elem = None
+                    kpp_elem = None
+                    
+                    if namespaces:
+                        name_elem = legal_entity.find("ns:НаимОрг", namespaces)
+                        inn_elem = legal_entity.find("ns:ИННЮЛ", namespaces)
+                        kpp_elem = legal_entity.find("ns:КПП", namespaces)
+                    
+                    if name_elem is None:
+                        name_elem = legal_entity.find("НаимОрг")
+                    if inn_elem is None:
+                        inn_elem = legal_entity.find("ИННЮЛ")
+                    if kpp_elem is None:
+                        kpp_elem = legal_entity.find("КПП")
+                    
+                    if name == "Не указано" and name_elem is not None:
+                        name = name_elem.text or "Не указано"
+                    if inn is None and inn_elem is not None:
+                        inn = inn_elem.text
+                    if kpp is None and kpp_elem is not None:
+                        kpp = kpp_elem.text
+                
+                # Если ИНН найден для юридического лица, возвращаем результат
+                if inn:
+                    logger.debug(f"Продавец (юридическое лицо): {name}, ИНН: {inn}, КПП: {kpp}")
+                    return Organization(name=name, inn=inn, kpp=kpp)
+                else:
+                    logger.debug("ИНН для юридического лица не найден, ищем индивидуального предпринимателя")
+            
+            # Если юридическое лицо не найдено или у него нет ИНН, ищем индивидуального предпринимателя (СвИП)
+            individual_entity = None
+            if namespaces:
+                individual_entity = seller_elem.find(".//ns:ИдСв/ns:СвИП", namespaces)
+            if individual_entity is None:
+                individual_entity = seller_elem.find(".//ИдСв/СвИП")
+            
+            # Fallback: ищем СвИП напрямую
+            if individual_entity is None:
                 if namespaces:
-                    name_elem = legal_entity.find("ns:НаимОрг", namespaces)
-                    inn_elem = legal_entity.find("ns:ИННЮЛ", namespaces)
-                    kpp_elem = legal_entity.find("ns:КПП", namespaces)
+                    individual_entity = seller_elem.find(".//ns:СвИП", namespaces)
+                if individual_entity is None:
+                    individual_entity = seller_elem.find(".//СвИП")
+            
+            # Если найден индивидуальный предприниматель, парсим его данные
+            if individual_entity is not None:
+                logger.debug("Найден индивидуальный предприниматель продавца")
                 
-                if name_elem is None:
-                    name_elem = legal_entity.find("НаимОрг")
-                if inn_elem is None:
-                    inn_elem = legal_entity.find("ИННЮЛ")
-                if kpp_elem is None:
-                    kpp_elem = legal_entity.find("КПП")
+                # Для ИП ИНН находится в атрибуте ИННФЛ
+                inn_fl = individual_entity.get("ИННФЛ")
                 
-                if name == "Не указано" and name_elem is not None:
-                    name = name_elem.text or "Не указано"
-                if inn == "0000000000" and inn_elem is not None:
-                    inn = inn_elem.text or "0000000000"
-                if kpp is None and kpp_elem is not None:
-                    kpp = kpp_elem.text
+                # Ищем ФИО в дочернем элементе ФИО
+                fio_elem = None
+                if namespaces:
+                    fio_elem = individual_entity.find("ns:ФИО", namespaces)
+                if fio_elem is None:
+                    fio_elem = individual_entity.find("ФИО")
+                
+                # Формируем имя из ФИО
+                name = "Не указано"
+                if fio_elem is not None:
+                    surname = fio_elem.get("Фамилия") or ""
+                    first_name = fio_elem.get("Имя") or ""
+                    patronymic = fio_elem.get("Отчество") or ""
+                    
+                    # Собираем полное имя
+                    name_parts = [surname, first_name, patronymic]
+                    name = " ".join(part for part in name_parts if part)
+                    if not name:
+                        name = "Не указано"
+                
+                # Если ИНН найден для ИП, возвращаем результат
+                if inn_fl:
+                    logger.debug(f"Продавец (индивидуальный предприниматель): {name}, ИНН: {inn_fl}")
+                    return Organization(name=name, inn=inn_fl, kpp=None)
+                else:
+                    logger.debug("ИННФЛ для индивидуального предпринимателя не найден")
             
-            logger.debug(f"Продавец (УПД 5.03): {name}, ИНН: {inn}, КПП: {kpp}")
+            # Если не удалось найти ни юридическое лицо, ни ИП с ИНН
+            logger.error("Не удалось определить ИНН продавца (ни для юридического лица, ни для ИП)")
+            raise UPDParsingError("Не удалось определить ИНН продавца в УПД документе. Проверьте корректность документа.")
             
-            return Organization(name=name, inn=inn, kpp=kpp)
-            
+        except UPDParsingError:
+            # Пробрасываем ошибки парсинга дальше
+            raise
         except Exception as e:
             logger.error(f"Ошибка парсинга информации о продавце: {e}")
-            return Organization(name="Не указано", inn="0000000000")
+            raise UPDParsingError(f"Ошибка парсинга информации о продавце: {e}")
     
     def _parse_buyer_info(self, tree: ET.Element, namespaces: dict) -> Organization:
         """Парсинг информации о покупателе (грузополучателе) для УПД 5.03"""
@@ -513,9 +571,9 @@ class UPDParser:
             
             if buyer_elem is None:
                 logger.warning("Элементы ГрузПолуч и СвПокуп не найдены")
-                return Organization(name="Не указано", inn="0000000000")
+                raise UPDParsingError("Не удалось определить покупателя в УПД документе")
             
-            # В УПД 5.03 структура: ГрузПолуч/ИдСв/СвЮЛУч
+            # Сначала пробуем найти юридическое лицо (СвЮЛУч)
             legal_entity = None
             if namespaces:
                 legal_entity = buyer_elem.find(".//ns:ИдСв/ns:СвЮЛУч", namespaces)
@@ -529,47 +587,105 @@ class UPDParser:
                 if legal_entity is None:
                     legal_entity = buyer_elem.find(".//СвЮЛУч")
             
-            if legal_entity is None:
-                logger.warning("Элемент СвЮЛУч не найден в покупателе")
-                return Organization(name="Не указано", inn="0000000000")
-            
-            # В УПД 5.03 данные находятся в атрибутах элемента СвЮЛУч
-            name = legal_entity.get("НаимОрг") or "Не указано"
-            inn = legal_entity.get("ИННЮЛ") or "0000000000"
-            kpp = legal_entity.get("КПП")
-            
-            # Fallback: если в атрибутах нет данных, ищем в дочерних элементах
-            if name == "Не указано" or inn == "0000000000":
-                name_elem = None
-                inn_elem = None
-                kpp_elem = None
+            # Если найдено юридическое лицо, парсим его данные
+            if legal_entity is not None:
+                logger.debug("Найдено юридическое лицо покупателя")
                 
+                # В УПД 5.03 данные находятся в атрибутах элемента СвЮЛУч
+                name = legal_entity.get("НаимОрг") or "Не указано"
+                inn = legal_entity.get("ИННЮЛ") or None
+                kpp = legal_entity.get("КПП")
+                
+                # Fallback: если в атрибутах нет данных, ищем в дочерних элементах
+                if name == "Не указано" or inn is None:
+                    name_elem = None
+                    inn_elem = None
+                    kpp_elem = None
+                    
+                    if namespaces:
+                        name_elem = legal_entity.find("ns:НаимОрг", namespaces)
+                        inn_elem = legal_entity.find("ns:ИННЮЛ", namespaces)
+                        kpp_elem = legal_entity.find("ns:КПП", namespaces)
+                    
+                    if name_elem is None:
+                        name_elem = legal_entity.find("НаимОрг")
+                    if inn_elem is None:
+                        inn_elem = legal_entity.find("ИННЮЛ")
+                    if kpp_elem is None:
+                        kpp_elem = legal_entity.find("КПП")
+                    
+                    if name == "Не указано" and name_elem is not None:
+                        name = name_elem.text or "Не указано"
+                    if inn is None and inn_elem is not None:
+                        inn = inn_elem.text
+                    if kpp is None and kpp_elem is not None:
+                        kpp = kpp_elem.text
+                
+                # Если ИНН найден для юридического лица, возвращаем результат
+                if inn:
+                    logger.debug(f"Покупатель (юридическое лицо): {name}, ИНН: {inn}, КПП: {kpp}")
+                    return Organization(name=name, inn=inn, kpp=kpp)
+                else:
+                    logger.debug("ИНН для юридического лица не найден, ищем индивидуального предпринимателя")
+            
+            # Если юридическое лицо не найдено или у него нет ИНН, ищем индивидуального предпринимателя (СвИП)
+            individual_entity = None
+            if namespaces:
+                individual_entity = buyer_elem.find(".//ns:ИдСв/ns:СвИП", namespaces)
+            if individual_entity is None:
+                individual_entity = buyer_elem.find(".//ИдСв/СвИП")
+            
+            # Fallback: ищем СвИП напрямую
+            if individual_entity is None:
                 if namespaces:
-                    name_elem = legal_entity.find("ns:НаимОрг", namespaces)
-                    inn_elem = legal_entity.find("ns:ИННЮЛ", namespaces)
-                    kpp_elem = legal_entity.find("ns:КПП", namespaces)
+                    individual_entity = buyer_elem.find(".//ns:СвИП", namespaces)
+                if individual_entity is None:
+                    individual_entity = buyer_elem.find(".//СвИП")
+            
+            # Если найден индивидуальный предприниматель, парсим его данные
+            if individual_entity is not None:
+                logger.debug("Найден индивидуальный предприниматель покупателя")
                 
-                if name_elem is None:
-                    name_elem = legal_entity.find("НаимОрг")
-                if inn_elem is None:
-                    inn_elem = legal_entity.find("ИННЮЛ")
-                if kpp_elem is None:
-                    kpp_elem = legal_entity.find("КПП")
+                # Для ИП ИНН находится в атрибуте ИННФЛ
+                inn_fl = individual_entity.get("ИННФЛ")
                 
-                if name == "Не указано" and name_elem is not None:
-                    name = name_elem.text or "Не указано"
-                if inn == "0000000000" and inn_elem is not None:
-                    inn = inn_elem.text or "0000000000"
-                if kpp is None and kpp_elem is not None:
-                    kpp = kpp_elem.text
+                # Ищем ФИО в дочернем элементе ФИО
+                fio_elem = None
+                if namespaces:
+                    fio_elem = individual_entity.find("ns:ФИО", namespaces)
+                if fio_elem is None:
+                    fio_elem = individual_entity.find("ФИО")
+                
+                # Формируем имя из ФИО
+                name = "Не указано"
+                if fio_elem is not None:
+                    surname = fio_elem.get("Фамилия") or ""
+                    first_name = fio_elem.get("Имя") or ""
+                    patronymic = fio_elem.get("Отчество") or ""
+                    
+                    # Собираем полное имя
+                    name_parts = [surname, first_name, patronymic]
+                    name = " ".join(part for part in name_parts if part)
+                    if not name:
+                        name = "Не указано"
+                
+                # Если ИНН найден для ИП, возвращаем результат
+                if inn_fl:
+                    logger.debug(f"Покупатель (индивидуальный предприниматель): {name}, ИНН: {inn_fl}")
+                    return Organization(name=name, inn=inn_fl, kpp=None)
+                else:
+                    logger.debug("ИННФЛ для индивидуального предпринимателя не найден")
             
-            logger.debug(f"Покупатель (грузополучатель, УПД 5.03): {name}, ИНН: {inn}, КПП: {kpp}")
+            # Если не удалось найти ни юридическое лицо, ни ИП с ИНН
+            logger.error("Не удалось определить ИНН покупателя (ни для юридического лица, ни для ИП)")
+            raise UPDParsingError("Не удалось определить ИНН покупателя в УПД документе. Проверьте корректность документа.")
             
-            return Organization(name=name, inn=inn, kpp=kpp)
-            
+        except UPDParsingError:
+            # Пробрасываем ошибки парсинга дальше
+            raise
         except Exception as e:
             logger.error(f"Ошибка парсинга информации о покупателе: {e}")
-            return Organization(name="Не указано", inn="0000000000")
+            raise UPDParsingError(f"Ошибка парсинга информации о покупателе: {e}")
     
     def _parse_invoice_items(self, tree: ET.Element, namespaces: dict) -> list:
         """Парсинг позиций счета-фактуры"""

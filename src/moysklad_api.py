@@ -310,14 +310,25 @@ class MoySkladAPI:
             
             # Создание нового контрагента
             logger.info(f"Создаю нового контрагента: {buyer.name}")
+            
+            # Определяем тип контрагента по длине ИНН
+            # ИНН физического лица (ИП) - 12 цифр, юридического лица - 10 цифр
+            is_individual = len(buyer.inn) == 12
+            
             counterparty_data = {
                 "name": buyer.name,
                 "inn": buyer.inn,
-                "companyType": "legal"
+                "companyType": "individual" if is_individual else "legal"
             }
             
-            if buyer.kpp:
+            # КПП указывается только для юридических лиц
+            if buyer.kpp and not is_individual:
                 counterparty_data["kpp"] = buyer.kpp
+            
+            if is_individual:
+                logger.info(f"Создаю контрагента как индивидуального предпринимателя (ИНН: {buyer.inn})")
+            else:
+                logger.info(f"Создаю контрагента как юридическое лицо (ИНН: {buyer.inn}, КПП: {buyer.kpp or 'не указан'})")
             
             response = self._make_request('POST', search_url, json_data=counterparty_data)
             
