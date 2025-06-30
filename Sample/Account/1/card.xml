@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<Card xmlns="http://api-invoice.taxcom.ru/card" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+	<Identifiers ExternalIdentifier="ce943e88-531b-11f0-912d-3c58c2c0cbf9"/>
+	<Type/>
+	<Description Title="Счет на оплату" Date="2025-06-27T00:00:00"/>
+	<Sender>
+		<Abonent Id="7843316106_784301001" Name="ООО &quot;ПОЛИКАРБОНАТНЫЕ ПРОФИЛИ&quot;" Inn="7843316106" Kpp="784301001"/>
+	</Sender>
+	<Receiver/>
+</Card>

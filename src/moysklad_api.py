@@ -6,8 +6,9 @@ import time
 from typing import Dict, Optional, List
 from loguru import logger
 
-from .config import Config
-from .models import UPDDocument, UPDContent, Organization
+from src.config import Config
+from src.models import UPDDocument, UPDContent, Organization
+from src.customer_invoice_parser import CustomerInvoiceDocument
 
 
 class MoySkladAPIError(Exception):
@@ -931,3 +932,337 @@ class MoySkladAPI:
             logger.error(f"Ошибка поиска счета по номеру {requisite_number}: {e}")
             return None
     
+    def create_customer_order_and_invoice(self, customer_invoice_doc: CustomerInvoiceDocument) -> Dict:
+        """
+        Создание заказа покупателя и счета покупателю из документа счета покупателю
+        
+        Args:
+            customer_invoice_doc: Документ счета покупателю
+            
+        Returns:
+            Dict: Результат создания с информацией о созданных документах
+            
+        Raises:
+            MoySkladAPIError: Ошибка создания документов
+        """
+        try:
+            logger.info(f"Создаю заказ покупателя и счет для документа: {customer_invoice_doc.invoice_number}")
+            
+            # Определяем нашу организацию (продавца)
+            seller_org = self._find_organization_by_inn(customer_invoice_doc.seller.inn)
+            if not seller_org:
+                raise MoySkladAPIError(f"Организация продавца с ИНН {customer_invoice_doc.seller.inn} не найдена в МойСклад")
+            
+            # Получаем или создаем контрагента (покупателя)
+            buyer_counterparty = self._get_or_create_counterparty(customer_invoice_doc.buyer)
+            
+            # Шаг 1: Создаем заказ покупателя
+            logger.info("Создаю заказ покупателя...")
+            customer_order = self._create_customer_order(customer_invoice_doc, seller_org, buyer_counterparty)
+            
+            # Шаг 2: Создаем счет покупателю на основе заказа
+            logger.info("Создаю счет покупателю...")
+            customer_invoice = self._create_customer_invoice(customer_invoice_doc, seller_org, buyer_counterparty, customer_order)
+            
+            logger.info(f"Документы успешно созданы: заказ {customer_order.get('id')}, счет {customer_invoice.get('id')}")
+            return {
+                "customer_order": customer_order,
+                "customer_invoice": customer_invoice,
+                "success": True
+            }
+            
+        except Exception as e:
+            error_msg = f"Ошибка создания заказа покупателя и счета: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
+    
+    def _create_customer_order(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict) -> Dict:
+        """Создание заказа покупателя"""
+        try:
+            # Формат даты для МойСклад
+            moment_str = customer_invoice_doc.invoice_date.strftime("%Y-%m-%d %H:%M:%S.000")
+            
+            # Создаем имя заказа с префиксом "П"
+            order_name = f"П{customer_invoice_doc.invoice_number}"
+            
+            order_data = {
+                "name": order_name,
+                "moment": moment_str,
+                "organization": {
+                    "meta": organization["meta"]
+                },
+                "agent": {
+                    "meta": counterparty["meta"]
+                },
+                "vatEnabled": True,
+                "vatIncluded": True,
+                "positions": []
+            }
+            
+            # Добавляем позиции
+            positions = self._create_positions_from_customer_invoice(customer_invoice_doc)
+            order_data["positions"] = positions
+            
+            # Создаем заказ
+            url = f"{self.base_url}/entity/customerorder"
+            response = self._make_request('POST', url, json_data=order_data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Заказ покупателя успешно создан: {result.get('id')}")
+                return result
+            else:
+                error_msg = f"Ошибка создания заказа покупателя: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                raise MoySkladAPIError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"Ошибка создания заказа покупателя: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
+    
+    def _create_customer_invoice(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict, customer_order: Dict) -> Dict:
+        """Создание счета покупателю на основе заказа"""
+        try:
+            # Формат даты для МойСклад
+            moment_str = customer_invoice_doc.invoice_date.strftime("%Y-%m-%d %H:%M:%S.000")
+            
+            invoice_data = {
+                "name": customer_invoice_doc.invoice_number,  # Номер счета как есть
+                "moment": moment_str,
+                "organization": {
+                    "meta": organization["meta"]
+                },
+                "agent": {
+                    "meta": counterparty["meta"]
+                },
+                "vatEnabled": True,
+                "vatIncluded": True,
+                # Привязываем к заказу покупателя
+                "customerOrders": [
+                    {
+                        "meta": customer_order["meta"]
+                    }
+                ],
+                "positions": []
+            }
+            
+            # Добавляем позиции (те же что и в заказе)
+            positions = self._create_positions_from_customer_invoice(customer_invoice_doc)
+            invoice_data["positions"] = positions
+            
+            # Создаем счет покупателю
+            url = f"{self.base_url}/entity/invoiceout"
+            response = self._make_request('POST', url, json_data=invoice_data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Счет покупателю успешно создан: {result.get('id')}")
+                return result
+            else:
+                error_msg = f"Ошибка создания счета покупателю: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                raise MoySkladAPIError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"Ошибка создания счета покупателю: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
+    
+    def _create_positions_from_customer_invoice(self, customer_invoice_doc: CustomerInvoiceDocument) -> List[Dict]:
+        """Создание позиций документа из счета покупателю с логикой определения склада и проекта"""
+        positions = []
+        missing_items = []
+        
+        for item in customer_invoice_doc.items:
+            # Определяем группу товара по названию и артикулу
+            product_group = self._determine_product_group(item.name, item.article)
+            
+            # Определяем склад и проект на основе группы товара
+            warehouse_name, project_name = self._get_warehouse_and_project_for_group(product_group)
+            
+            # Ищем товар в МойСклад
+            product = None
+            if item.article:
+                logger.info(f"Ищем товар по артикулу: {item.article}")
+                product = self._find_product_by_article(item.article)
+                if product:
+                    logger.info(f"✅ Товар найден по артикулу {item.article}: {product.get('name', 'без названия')}")
+                else:
+                    logger.warning(f"❌ Товар не найден по артикулу: {item.article}")
+            
+            # Если не найден по артикулу, ищем по названию
+            if not product:
+                logger.info(f"Ищем товар по названию: {item.name}")
+                product = self._find_product(item.name)
+                if product:
+                    logger.info(f"✅ Товар найден по названию: {product.get('name', 'без названия')}")
+                else:
+                    logger.warning(f"❌ Товар не найден по названию: {item.name}")
+            
+            if product:
+                # Цена в копейках
+                price_kopecks = int(float(item.price) * 100)
+                
+                # Ищем склад по названию
+                warehouse = self._find_warehouse_by_name(warehouse_name)
+                if not warehouse:
+                    logger.warning(f"Склад '{warehouse_name}' не найден, используем основной склад")
+                    warehouse = self._get_main_warehouse()
+                
+                # Ищем проект по названию
+                project = self._find_project_by_name(project_name)
+                if not project:
+                    logger.warning(f"Проект '{project_name}' не найден")
+                
+                position = {
+                    "quantity": float(item.quantity),
+                    "price": price_kopecks,
+                    "assortment": {
+                        "meta": product["meta"]
+                    },
+                    "vat": self._get_vat_rate(item.vat_rate)
+                }
+                
+                # Добавляем склад если найден
+                if warehouse:
+                    position["store"] = {
+                        "meta": warehouse["meta"]
+                    }
+                    logger.info(f"Товар '{item.name}' → склад '{warehouse.get('name', 'без названия')}'")
+                
+                # Добавляем проект если найден
+                if project:
+                    position["project"] = {
+                        "meta": project["meta"]
+                    }
+                    logger.info(f"Товар '{item.name}' → проект '{project.get('name', 'без названия')}'")
+                
+                positions.append(position)
+                
+                # Логируем итоговое назначение
+                logger.info(f"Позиция: {item.name} (группа: {product_group}) → склад: {warehouse_name}, проект: {project_name}")
+            else:
+                missing_items.append(f"{item.name} (артикул: {item.article or 'не указан'})")
+        
+        # Если есть отсутствующие товары, выдаем ошибку
+        if missing_items:
+            error_msg = (
+                f"В МойСклад не найдены следующие товары из счета покупателю:\n"
+                f"• {chr(10).join(missing_items)}\n\n"
+                f"Создайте эти товары в МойСклад вручную и повторите загрузку."
+            )
+            raise MoySkladAPIError(error_msg)
+        
+        return positions
+    
+    def _determine_product_group(self, product_name: str, product_article: Optional[str]) -> str:
+        """Определение группы товара по названию и артикулу"""
+        # Приводим к нижнему регистру для поиска
+        name_lower = product_name.lower() if product_name else ""
+        article_lower = product_article.lower() if product_article else ""
+        
+        # Ключевые слова для определения группы "трубы"
+        tube_keywords = ["труба", "трубы", "трубка", "трубный", "трубопровод"]
+        
+        # Ключевые слова для определения группы "профиль"
+        profile_keywords = ["профиль", "профили", "профильный", "профилированный"]
+        
+        # Проверяем название товара
+        for keyword in tube_keywords:
+            if keyword in name_lower:
+                return "трубы"
+        
+        for keyword in profile_keywords:
+            if keyword in name_lower:
+                return "профиль"
+        
+        # Проверяем артикул
+        for keyword in tube_keywords:
+            if keyword in article_lower:
+                return "трубы"
+        
+        for keyword in profile_keywords:
+            if keyword in article_lower:
+                return "профиль"
+        
+        # По умолчанию возвращаем "профиль"
+        logger.debug(f"Группа товара не определена для '{product_name}' (артикул: {product_article}), используем 'профиль'")
+        return "профиль"
+    
+    def _get_warehouse_and_project_for_group(self, product_group: str) -> tuple[str, str]:
+        """Получение склада и проекта для группы товара"""
+        if product_group == "трубы":
+            return "Сестрорецк ПП", "Трубы"
+        elif product_group == "профиль":
+            return "Гатчина", "Профили"
+        else:
+            # По умолчанию
+            return "Гатчина", "Профили"
+    
+    def _find_warehouse_by_name(self, warehouse_name: str) -> Optional[Dict]:
+        """Поиск склада по названию"""
+        try:
+            search_url = f"{self.base_url}/entity/store"
+            params = {"filter": f"name={warehouse_name}"}
+            response = self._make_request('GET', search_url, params=params)
+            
+            if response.status_code == 200:
+                warehouses = response.json().get("rows", [])
+                if warehouses:
+                    logger.debug(f"Найден склад: {warehouses[0]['name']}")
+                    return warehouses[0]
+            
+            logger.warning(f"Склад '{warehouse_name}' не найден")
+            return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка поиска склада: {e}")
+            return None
+    
+    def _find_project_by_name(self, project_name: str) -> Optional[Dict]:
+        """Поиск проекта по названию"""
+        try:
+            search_url = f"{self.base_url}/entity/project"
+            params = {"filter": f"name={project_name}"}
+            response = self._make_request('GET', search_url, params=params)
+            
+            if response.status_code == 200:
+                projects = response.json().get("rows", [])
+                if projects:
+                    logger.debug(f"Найден проект: {projects[0]['name']}")
+                    return projects[0]
+            
+            logger.warning(f"Проект '{project_name}' не найден")
+            return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка поиска проекта: {e}")
+            return None
+    
+    def _get_main_warehouse(self) -> Optional[Dict]:
+        """Получение основного склада"""
+        try:
+            search_url = f"{self.base_url}/entity/store"
+            response = self._make_request('GET', search_url)
+            
+            if response.status_code == 200:
+                warehouses = response.json().get("rows", [])
+                if warehouses:
+                    logger.debug(f"Использую основной склад: {warehouses[0]['name']}")
+                    return warehouses[0]
+            
+            logger.warning("Склады не найдены")
+            return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения основного склада: {e}")
+            return None
+    
+    def get_customer_order_url(self, order_id: str) -> str:
+        """Получение URL заказа покупателя в веб-интерфейсе МойСклад"""
+        return f"https://online.moysklad.ru/app/#customerorder/edit?id={order_id}"
+    
+    def get_customer_invoice_url(self, invoice_id: str) -> str:
+        """Получение URL счета покупателю в веб-интерфейсе МойСклад"""
+        return f"https://online.moysklad.ru/app/#invoiceout/edit?id={invoice_id}"

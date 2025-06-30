@@ -13,13 +13,15 @@ from loguru import logger
 
 from .config import Config
 from .upd_processor import UPDProcessor
+from .customer_invoice_processor import CustomerInvoiceProcessor
 
 
 class TelegramUPDBot:
     """Telegram бот для обработки УПД"""
     
     def __init__(self):
-        self.processor = UPDProcessor()
+        self.upd_processor = UPDProcessor()
+        self.customer_invoice_processor = CustomerInvoiceProcessor()
         self.application = None
     
     def setup_bot(self) -> Application:
@@ -57,12 +59,14 @@ class TelegramUPDBot:
             return
         
         welcome_message = (
-            "🤖 Добро пожаловать в бот загрузки УПД в МойСклад!\n\n"
+            "🤖 Добро пожаловать в бот загрузки документов в МойСклад!\n\n"
             "📋 Что я умею:\n"
             "• Обрабатывать ZIP архивы с УПД документами\n"
-            "• Создавать счета-фактуры в МойСклад\n"
+            "• Обрабатывать ZIP архивы со счетами покупателю (CommerceML)\n"
+            "• Создавать счета-фактуры и отгрузки в МойСклад\n"
+            "• Создавать заказы покупателя и счета покупателю в МойСклад\n"
             "• Предоставлять детальную информацию о результатах\n\n"
-            "📎 Просто отправьте мне ZIP файл с УПД, и я его обработаю!\n\n"
+            "📎 Просто отправьте мне ZIP файл с документом, и я его обработаю!\n\n"
             "ℹ️ Используйте /help для получения дополнительной информации."
         )
         
@@ -82,14 +86,17 @@ class TelegramUPDBot:
             "/start - Начать работу с ботом\n"
             "/help - Показать эту справку\n"
             "/status - Проверить статус подключения к МойСклад\n\n"
-            "📎 Как загрузить УПД:\n"
-            "1. Отправьте ZIP архив с УПД документом\n"
+            "📎 Как загрузить документы:\n"
+            "1. Отправьте ZIP архив с документом (УПД или счет покупателю)\n"
             "2. Дождитесь обработки (обычно 10-30 секунд)\n"
-            "3. Получите результат с ссылкой на созданный документ\n\n"
+            "3. Получите результат с ссылкой на созданные документы\n\n"
+            "📋 Поддерживаемые типы документов:\n"
+            "• УПД (Универсальный передаточный документ)\n"
+            "• Счета покупателю в формате CommerceML (1С)\n\n"
             "📋 Требования к файлам:\n"
             f"• Формат: ZIP архив\n"
             f"• Максимальный размер: {Config.MAX_FILE_SIZE // 1024 // 1024} МБ\n"
-            "• Содержимое: УПД в стандартном формате\n\n"
+            "• Содержимое: документ в стандартном формате\n\n"
             "❓ При возникновении проблем обратитесь к администратору."
         )
         
@@ -109,7 +116,7 @@ class TelegramUPDBot:
         # Проверяем подключение с детальной информацией
         try:
             status_info = await asyncio.get_event_loop().run_in_executor(
-                None, self.processor.get_moysklad_status
+                None, self.upd_processor.get_moysklad_status
             )
             
             if status_info["success"]:
@@ -175,7 +182,7 @@ class TelegramUPDBot:
             # Отправляем сообщение о начале обработки
             processing_message = await update.message.reply_text(
                 f"📄 Получен файл: {document.file_name}\n"
-                "🔄 Начинаю обработку УПД...\n\n"
+                "🔄 Определяю тип документа и начинаю обработку...\n\n"
                 "⏳ Это может занять до 30 секунд, пожалуйста, подождите."
             )
             
@@ -183,10 +190,10 @@ class TelegramUPDBot:
             file = await context.bot.get_file(document.file_id)
             file_content = await file.download_as_bytearray()
             
-            # Обрабатываем УПД
+            # Определяем тип документа и обрабатываем
             result = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                self.processor.process_upd_file,
+                None,
+                self._process_document,
                 bytes(file_content),
                 document.file_name
             )
@@ -195,9 +202,9 @@ class TelegramUPDBot:
             await processing_message.edit_text(result.message)
             
             if result.success:
-                logger.info(f"УПД успешно обработан для пользователя {user_id}")
+                logger.info(f"Документ успешно обработан для пользователя {user_id}")
             else:
-                logger.warning(f"Ошибка обработки УПД для пользователя {user_id}: {result.error_code}")
+                logger.warning(f"Ошибка обработки документа для пользователя {user_id}: {result.error_code}")
             
         except Exception as e:
             logger.error(f"Ошибка обработки документа: {e}")
@@ -215,9 +222,96 @@ class TelegramUPDBot:
             return
         
         await update.message.reply_text(
-            "📎 Для обработки УПД отправьте мне ZIP архив с документом.\n\n"
+            "📎 Для обработки документов отправьте мне ZIP архив с УПД или счетом покупателю.\n\n"
             "ℹ️ Используйте /help для получения подробной информации."
         )
+    
+    def _process_document(self, file_content: bytes, filename: str):
+        """Определение типа документа и его обработка"""
+        import tempfile
+        import zipfile
+        import os
+        from pathlib import Path
+        
+        # Создаем временный файл для анализа
+        temp_zip = tempfile.NamedTemporaryFile(suffix='.zip', delete=False)
+        try:
+            temp_zip.write(file_content)
+            temp_zip.flush()
+            temp_zip.close()
+            
+            # Анализируем содержимое архива для определения типа документа
+            document_type = self._detect_document_type(temp_zip.name)
+            
+            logger.info(f"Определен тип документа: {document_type}")
+            
+            if document_type == "customer_invoice":
+                logger.info("Обрабатываю как счет покупателю (CommerceML)")
+                return self.customer_invoice_processor.process_customer_invoice_file(file_content, filename)
+            elif document_type == "upd":
+                logger.info("Обрабатываю как УПД")
+                return self.upd_processor.process_upd_file(file_content, filename)
+            else:
+                # По умолчанию пробуем как УПД
+                logger.info("Тип документа не определен, пробую как УПД")
+                return self.upd_processor.process_upd_file(file_content, filename)
+                
+        finally:
+            # Удаляем временный файл
+            try:
+                os.unlink(temp_zip.name)
+            except:
+                pass
+    
+    def _detect_document_type(self, zip_path: str) -> str:
+        """Определение типа документа по содержимому архива"""
+        import zipfile
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                file_list = zip_ref.namelist()
+                
+                # Ищем признаки счета покупателю (CommerceML)
+                has_meta_xml = any('meta.xml' in f.lower() for f in file_list)
+                has_card_xml = any('card.xml' in f.lower() for f in file_list)
+                has_schet_xml = any('schet' in f.lower() and f.endswith('.xml') for f in file_list)
+                
+                # Если есть meta.xml, card.xml и файл со словом "schet" - это счет покупателю
+                if has_meta_xml and has_card_xml and has_schet_xml:
+                    logger.debug("Найдены признаки счета покупателю: meta.xml, card.xml, schet*.xml")
+                    return "customer_invoice"
+                
+                # Ищем признаки УПД
+                has_upd_xml = any(f.endswith('.xml') and ('upd' in f.lower() or 'on_nschf' in f.lower()) for f in file_list)
+                
+                if has_upd_xml:
+                    logger.debug("Найдены признаки УПД: файлы с upd или on_nschf")
+                    return "upd"
+                
+                # Дополнительная проверка содержимого XML файлов
+                for file_name in file_list:
+                    if file_name.endswith('.xml'):
+                        try:
+                            with zip_ref.open(file_name) as xml_file:
+                                content = xml_file.read(1024).decode('utf-8', errors='ignore')
+                                
+                                # Проверяем на CommerceML namespace
+                                if 'urn:1C.ru:commerceml' in content:
+                                    logger.debug(f"Найден CommerceML namespace в файле {file_name}")
+                                    return "customer_invoice"
+                                
+                                # Проверяем на УПД элементы
+                                if any(keyword in content for keyword in ['СчФакт', 'УПД', 'НСЧФ']):
+                                    logger.debug(f"Найдены УПД элементы в файле {file_name}")
+                                    return "upd"
+                        except:
+                            continue
+                
+                logger.debug("Тип документа не определен по содержимому")
+                return "unknown"
+                
+        except Exception as e:
+            logger.error(f"Ошибка определения типа документа: {e}")
+            return "unknown"
     
     def _is_authorized_user(self, user_id: int) -> bool:
         """Проверка авторизации пользователя"""
