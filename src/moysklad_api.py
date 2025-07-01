@@ -1161,6 +1161,9 @@ class MoySkladAPI:
             # Определяем основной проект для заказа на основе товаров
             main_project = self._determine_main_project_for_order(customer_invoice_doc)
             
+            # Генерируем комментарий из товаров
+            comment = self._generate_comment_from_items(customer_invoice_doc)
+            
             order_data = {
                 "name": order_name,
                 "moment": moment_str,
@@ -1172,6 +1175,7 @@ class MoySkladAPI:
                 },
                 "vatEnabled": True,
                 "vatIncluded": True,
+                "description": comment,
                 "positions": []
             }
             
@@ -1223,6 +1227,9 @@ class MoySkladAPI:
             # Определяем основной проект для счета на основе товаров
             main_project = self._determine_main_project_for_order(customer_invoice_doc)
             
+            # Генерируем комментарий из товаров (копируется из заказа)
+            comment = self._generate_comment_from_items(customer_invoice_doc)
+            
             invoice_data = {
                 "name": customer_invoice_doc.invoice_number,  # Номер счета как есть
                 "moment": moment_str,
@@ -1234,6 +1241,7 @@ class MoySkladAPI:
                 },
                 "vatEnabled": True,
                 "vatIncluded": True,
+                "description": comment,
                 "positions": []
             }
             
@@ -1332,6 +1340,9 @@ class MoySkladAPI:
             # Определяем основной проект для счета на основе товаров
             main_project = self._determine_main_project_for_order(customer_invoice_doc)
             
+            # Генерируем комментарий из товаров
+            comment = self._generate_comment_from_items(customer_invoice_doc)
+            
             invoice_data = {
                 "name": customer_invoice_doc.invoice_number,  # Номер счета как есть
                 "moment": moment_str,
@@ -1343,6 +1354,7 @@ class MoySkladAPI:
                 },
                 "vatEnabled": True,
                 "vatIncluded": True,
+                "description": comment,
                 "positions": []
             }
             
@@ -1484,6 +1496,21 @@ class MoySkladAPI:
             raise MoySkladAPIError(error_msg)
         
         return positions
+    
+    def _generate_comment_from_items(self, customer_invoice_doc: CustomerInvoiceDocument) -> str:
+        """Генерация комментария из товаров в формате: <артикул> - <количество>"""
+        comment_lines = []
+        
+        for item in customer_invoice_doc.items:
+            # Используем артикул если есть, иначе название товара
+            identifier = item.article if item.article else item.name
+            quantity = item.quantity
+            
+            comment_lines.append(f"{identifier} - {quantity}")
+        
+        comment = "\n".join(comment_lines)
+        logger.debug(f"Сформирован комментарий: {comment}")
+        return comment
     
     def _determine_product_group(self, product_name: str, product_article: Optional[str]) -> str:
         """Определение группы товара по названию и артикулу"""
