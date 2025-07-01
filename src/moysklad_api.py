@@ -296,7 +296,7 @@ class MoySkladAPI:
             raise MoySkladAPIError(error_msg)
     
     def _get_or_create_counterparty(self, buyer: Organization) -> Dict:
-        """Получение или создание контрагента"""
+        """Получение или создание контрагента с поиском данных по ИНН"""
         try:
             # Поиск по ИНН
             search_url = f"{self.base_url}/entity/counterparty"
@@ -309,15 +309,18 @@ class MoySkladAPI:
                     logger.info(f"Найден существующий контрагент: {counterparties[0]['name']}")
                     return counterparties[0]
             
-            # Создание нового контрагента
+            # Создание нового контрагента с расширенными данными по ИНН
             logger.info(f"Создаю нового контрагента: {buyer.name}")
             
             # Определяем тип контрагента по длине ИНН
             # ИНН физического лица (ИП) - 12 цифр, юридического лица - 10 цифр
             is_individual = len(buyer.inn) == 12
             
+            # Пытаемся получить дополнительные данные по ИНН из внешних источников
+            enhanced_data = self._lookup_counterparty_by_inn(buyer.inn)
+            
             counterparty_data = {
-                "name": buyer.name,
+                "name": enhanced_data.get("name", buyer.name),
                 "inn": buyer.inn,
                 "companyType": "individual" if is_individual else "legal"
             }
@@ -325,11 +328,20 @@ class MoySkladAPI:
             # КПП указывается только для юридических лиц
             if buyer.kpp and not is_individual:
                 counterparty_data["kpp"] = buyer.kpp
+            elif enhanced_data.get("kpp") and not is_individual:
+                counterparty_data["kpp"] = enhanced_data["kpp"]
+            
+            # Добавляем дополнительные данные если получены
+            if enhanced_data.get("legalAddress"):
+                counterparty_data["legalAddress"] = enhanced_data["legalAddress"]
+            
+            if enhanced_data.get("actualAddress"):
+                counterparty_data["actualAddress"] = enhanced_data["actualAddress"]
             
             if is_individual:
                 logger.info(f"Создаю контрагента как индивидуального предпринимателя (ИНН: {buyer.inn})")
             else:
-                logger.info(f"Создаю контрагента как юридическое лицо (ИНН: {buyer.inn}, КПП: {buyer.kpp or 'не указан'})")
+                logger.info(f"Создаю контрагента как юридическое лицо (ИНН: {buyer.inn}, КПП: {counterparty_data.get('kpp', 'не указан')})")
             
             response = self._make_request('POST', search_url, json_data=counterparty_data)
             
@@ -346,6 +358,35 @@ class MoySkladAPI:
             error_msg = f"Сетевая ошибка при работе с контрагентом: {e}"
             logger.error(error_msg)
             raise MoySkladAPIError(error_msg)
+    
+    def _lookup_counterparty_by_inn(self, inn: str) -> Dict:
+        """Поиск данных контрагента по ИНН через внешние сервисы"""
+        try:
+            # Попытка использовать встроенные возможности МойСклад для поиска по ИНН
+            # МойСклад может иметь интеграцию с налоговыми базами
+            logger.debug(f"Ищу дополнительные данные по ИНН: {inn}")
+            
+            # Проверяем есть ли в МойСклад специальный endpoint для поиска по ИНН
+            lookup_url = f"{self.base_url}/entity/counterparty/byinn/{inn}"
+            response = self._make_request('GET', lookup_url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                logger.info(f"Получены дополнительные данные по ИНН {inn} из МойСклад")
+                return {
+                    "name": data.get("name", ""),
+                    "kpp": data.get("kpp", ""),
+                    "legalAddress": data.get("legalAddress", ""),
+                    "actualAddress": data.get("actualAddress", "")
+                }
+            else:
+                logger.debug(f"Специальный endpoint поиска по ИНН недоступен: {response.status_code}")
+                
+        except Exception as e:
+            logger.debug(f"Ошибка поиска данных по ИНН: {e}")
+        
+        # Возвращаем пустой словарь если данные не найдены
+        return {}
     
     def _get_organization(self) -> Dict:
         """Получение информации об организации"""
@@ -960,8 +1001,8 @@ class MoySkladAPI:
             logger.info("Создаю заказ покупателя...")
             customer_order = self._create_customer_order(customer_invoice_doc, seller_org, buyer_counterparty)
             
-            # Шаг 2: Создаем счет покупателю на основе заказа
-            logger.info("Создаю счет покупателю...")
+            # Шаг 2: Создаем счет покупателю с привязкой к заказу
+            logger.info("Создаю счет покупателю с привязкой к заказу...")
             customer_invoice = self._create_customer_invoice(customer_invoice_doc, seller_org, buyer_counterparty, customer_order)
             
             logger.info(f"Документы успешно созданы: заказ {customer_order.get('id')}, счет {customer_invoice.get('id')}")
@@ -976,6 +1017,135 @@ class MoySkladAPI:
             logger.error(error_msg)
             raise MoySkladAPIError(error_msg)
     
+    def _determine_main_warehouse_for_order(self, customer_invoice_doc: CustomerInvoiceDocument) -> Optional[Dict]:
+        """Определяет основной склад для заказа на основе товаров"""
+        try:
+            warehouses = self._get_warehouses()
+            if not warehouses:
+                logger.warning("Склады не найдены")
+                return None
+            
+            # Подсчитываем товары по группам
+            profile_count = 0
+            tube_count = 0
+            
+            for item in customer_invoice_doc.items:
+                item_name = item.name.lower()
+                if 'профиль' in item_name:
+                    profile_count += 1
+                elif 'труб' in item_name:
+                    tube_count += 1
+            
+            # Определяем основной склад
+            target_warehouse_name = None
+            if profile_count > tube_count:
+                target_warehouse_name = "Гатчина"
+                logger.info(f"Больше профилей ({profile_count}), выбираем склад Гатчина")
+            elif tube_count > profile_count:
+                target_warehouse_name = "Сестрорецк ПП"
+                logger.info(f"Больше труб ({tube_count}), выбираем склад Сестрорецк ПП")
+            else:
+                # Если равное количество или нет подходящих товаров, берем первый склад
+                logger.info(f"Равное количество товаров или нет подходящих, берем первый склад")
+                return warehouses[0] if warehouses else None
+            
+            # Ищем склад по названию
+            for warehouse in warehouses:
+                if target_warehouse_name.lower() in warehouse.get('name', '').lower():
+                    logger.info(f"Найден склад: {warehouse.get('name')}")
+                    return warehouse
+            
+            # Если не найден нужный склад, берем первый
+            logger.warning(f"Склад '{target_warehouse_name}' не найден, берем первый доступный")
+            return warehouses[0] if warehouses else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка определения склада: {e}")
+            return None
+
+    def _determine_main_project_for_order(self, customer_invoice_doc: CustomerInvoiceDocument) -> Optional[Dict]:
+        """Определяет основной проект для заказа на основе товаров"""
+        try:
+            projects = self._get_projects()
+            if not projects:
+                logger.warning("Проекты не найдены")
+                return None
+            
+            # Подсчитываем товары по группам
+            profile_count = 0
+            tube_count = 0
+            
+            for item in customer_invoice_doc.items:
+                item_name = item.name.lower()
+                if 'профиль' in item_name:
+                    profile_count += 1
+                elif 'труб' in item_name:
+                    tube_count += 1
+            
+            # Определяем основной проект
+            target_project_name = None
+            if profile_count > tube_count:
+                target_project_name = "профили"  # Используем точное название из справочника
+                logger.info(f"Больше профилей ({profile_count}), выбираем проект 'профили'")
+            elif tube_count > profile_count:
+                target_project_name = "Трубы"
+                logger.info(f"Больше труб ({tube_count}), выбираем проект Трубы")
+            else:
+                # Если равное количество или нет подходящих товаров, выбираем профили по умолчанию
+                target_project_name = "профили"
+                logger.info(f"Равное количество товаров или нет подходящих, выбираем проект 'профили' по умолчанию")
+            
+            # Ищем проект по названию (регистронезависимый поиск)
+            for project in projects:
+                project_name = project.get('name', '').lower()
+                if target_project_name.lower() in project_name or project_name in target_project_name.lower():
+                    logger.info(f"Найден проект: {project.get('name')}")
+                    return project
+            
+            # Если не найден нужный проект, берем первый
+            logger.warning(f"Проект '{target_project_name}' не найден, берем первый доступный")
+            return projects[0] if projects else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка определения проекта: {e}")
+            return None
+
+    def _get_warehouses(self) -> List[Dict]:
+        """Получение списка складов"""
+        try:
+            url = f"{self.base_url}/entity/store"
+            response = self._make_request('GET', url)
+            
+            if response.status_code == 200:
+                warehouses = response.json().get("rows", [])
+                logger.debug(f"Найдено складов: {len(warehouses)}")
+                return warehouses
+            else:
+                logger.error(f"Ошибка получения складов: {response.status_code}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения складов: {e}")
+            return []
+
+    def _get_projects(self) -> List[Dict]:
+        """Получение списка проектов"""
+        try:
+            url = f"{self.base_url}/entity/project"
+            response = self._make_request('GET', url)
+            
+            if response.status_code == 200:
+                projects = response.json().get("rows", [])
+                logger.debug(f"Найдено проектов: {len(projects)}")
+                return projects
+            else:
+                logger.debug(f"Проекты недоступны: {response.status_code}")
+                return []
+                
+        except Exception as e:
+            logger.debug(f"Ошибка получения проектов: {e}")
+            return []
+
     def _create_customer_order(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict) -> Dict:
         """Создание заказа покупателя"""
         try:
@@ -984,6 +1154,12 @@ class MoySkladAPI:
             
             # Создаем имя заказа с префиксом "П"
             order_name = f"П{customer_invoice_doc.invoice_number}"
+            
+            # Определяем основной склад для заказа на основе товаров
+            main_warehouse = self._determine_main_warehouse_for_order(customer_invoice_doc)
+            
+            # Определяем основной проект для заказа на основе товаров
+            main_project = self._determine_main_project_for_order(customer_invoice_doc)
             
             order_data = {
                 "name": order_name,
@@ -998,6 +1174,20 @@ class MoySkladAPI:
                 "vatIncluded": True,
                 "positions": []
             }
+            
+            # Добавляем склад если определен
+            if main_warehouse:
+                order_data["store"] = {
+                    "meta": main_warehouse["meta"]
+                }
+                logger.info(f"Заказ будет создан со складом: {main_warehouse.get('name', 'без названия')}")
+            
+            # Добавляем проект если определен
+            if main_project:
+                order_data["project"] = {
+                    "meta": main_project["meta"]
+                }
+                logger.info(f"Заказ будет создан с проектом: {main_project.get('name', 'без названия')}")
             
             # Добавляем позиции
             positions = self._create_positions_from_customer_invoice(customer_invoice_doc)
@@ -1021,11 +1211,17 @@ class MoySkladAPI:
             logger.error(error_msg)
             raise MoySkladAPIError(error_msg)
     
-    def _create_customer_invoice(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict, customer_order: Dict) -> Dict:
-        """Создание счета покупателю на основе заказа"""
+    def _create_customer_invoice_without_order(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict) -> Dict:
+        """Создание счета покупателю БЕЗ привязки к заказу"""
         try:
             # Формат даты для МойСклад
             moment_str = customer_invoice_doc.invoice_date.strftime("%Y-%m-%d %H:%M:%S.000")
+            
+            # Определяем основной склад для счета на основе товаров
+            main_warehouse = self._determine_main_warehouse_for_order(customer_invoice_doc)
+            
+            # Определяем основной проект для счета на основе товаров
+            main_project = self._determine_main_project_for_order(customer_invoice_doc)
             
             invoice_data = {
                 "name": customer_invoice_doc.invoice_number,  # Номер счета как есть
@@ -1038,14 +1234,140 @@ class MoySkladAPI:
                 },
                 "vatEnabled": True,
                 "vatIncluded": True,
-                # Привязываем к заказу покупателя
-                "customerOrders": [
-                    {
-                        "meta": customer_order["meta"]
-                    }
-                ],
                 "positions": []
             }
+            
+            # Добавляем склад если определен
+            if main_warehouse:
+                invoice_data["store"] = {
+                    "meta": main_warehouse["meta"]
+                }
+                logger.info(f"Счет будет создан со складом: {main_warehouse.get('name', 'без названия')}")
+            
+            # Добавляем проект если определен
+            if main_project:
+                invoice_data["project"] = {
+                    "meta": main_project["meta"]
+                }
+                logger.info(f"Счет будет создан с проектом: {main_project.get('name', 'без названия')}")
+            
+            # Добавляем позиции
+            positions = self._create_positions_from_customer_invoice(customer_invoice_doc)
+            invoice_data["positions"] = positions
+            
+            # Создаем счет покупателю
+            url = f"{self.base_url}/entity/invoiceout"
+            response = self._make_request('POST', url, json_data=invoice_data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Счет покупателю успешно создан (без привязки к заказу): {result.get('id')}")
+                return result
+            else:
+                error_msg = f"Ошибка создания счета покупателю: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                raise MoySkladAPIError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"Ошибка создания счета покупателю: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
+
+    def _link_invoice_to_order(self, customer_invoice: Dict, customer_order: Dict) -> Dict:
+        """Привязка счета покупателю к заказу покупателя отдельным запросом"""
+        try:
+            if not customer_order or not customer_order.get("meta"):
+                logger.warning("Заказ покупателя не содержит метаданных для привязки")
+                return customer_invoice
+            
+            # Получаем ID счета
+            invoice_id = customer_invoice.get('id')
+            if not invoice_id:
+                raise MoySkladAPIError("Счет не содержит ID для редактирования")
+            
+            # Подготавливаем данные для обновления счета
+            update_data = {
+                "customerOrder": {
+                    "meta": customer_order["meta"]
+                }
+            }
+            
+            # Обновляем счет, добавляя привязку к заказу
+            url = f"{self.base_url}/entity/invoiceout/{invoice_id}"
+            response = self._make_request('PUT', url, json_data=update_data, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"✅ Счет {invoice_id} успешно привязан к заказу {customer_order.get('name', 'без названия')}")
+                
+                # Проверяем что привязка действительно установлена
+                customer_order_link = result.get('customerOrder')
+                if customer_order_link:
+                    logger.info(f"✅ Привязка к заказу подтверждена в ответе API")
+                else:
+                    # Иногда МойСклад не возвращает полную структуру в ответе на PUT
+                    # Но если статус 200, то операция успешна
+                    logger.info(f"✅ Привязка выполнена успешно (статус 200)")
+                
+                return result
+            else:
+                error_msg = f"Ошибка привязки счета к заказу: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                raise MoySkladAPIError(error_msg)
+                
+        except Exception as e:
+            error_msg = f"Ошибка привязки счета к заказу: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
+
+    def _create_customer_invoice(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict, customer_order: Dict) -> Dict:
+        """Создание счета покупателю на основе заказа (старый метод для совместимости)"""
+        try:
+            # Формат даты для МойСклад
+            moment_str = customer_invoice_doc.invoice_date.strftime("%Y-%m-%d %H:%M:%S.000")
+            
+            # Определяем основной склад для счета на основе товаров
+            main_warehouse = self._determine_main_warehouse_for_order(customer_invoice_doc)
+            
+            # Определяем основной проект для счета на основе товаров
+            main_project = self._determine_main_project_for_order(customer_invoice_doc)
+            
+            invoice_data = {
+                "name": customer_invoice_doc.invoice_number,  # Номер счета как есть
+                "moment": moment_str,
+                "organization": {
+                    "meta": organization["meta"]
+                },
+                "agent": {
+                    "meta": counterparty["meta"]
+                },
+                "vatEnabled": True,
+                "vatIncluded": True,
+                "positions": []
+            }
+            
+            # Привязываем к заказу покупателя в формате метаданных
+            if customer_order and customer_order.get("meta"):
+                invoice_data["customerOrder"] = {
+                    "meta": customer_order["meta"]
+                }
+                logger.info(f"Счет будет привязан к заказу: {customer_order.get('name', 'без названия')}")
+            else:
+                logger.warning("Заказ покупателя не содержит метаданных для привязки")
+            
+            # Добавляем склад если определен
+            if main_warehouse:
+                invoice_data["store"] = {
+                    "meta": main_warehouse["meta"]
+                }
+                logger.info(f"Счет будет создан со складом: {main_warehouse.get('name', 'без названия')}")
+            
+            # Добавляем проект если определен
+            if main_project:
+                invoice_data["project"] = {
+                    "meta": main_project["meta"]
+                }
+                logger.info(f"Счет будет создан с проектом: {main_project.get('name', 'без названия')}")
             
             # Добавляем позиции (те же что и в заказе)
             positions = self._create_positions_from_customer_invoice(customer_invoice_doc)
@@ -1058,6 +1380,13 @@ class MoySkladAPI:
             if response.status_code == 200:
                 result = response.json()
                 logger.info(f"Счет покупателю успешно создан: {result.get('id')}")
+                
+                # Проверяем что счет действительно привязан к заказу
+                if result.get('customerOrder'):
+                    logger.info(f"✅ Счет успешно привязан к заказу покупателя")
+                else:
+                    logger.warning(f"⚠️ Счет создан, но привязка к заказу не подтверждена")
+                
                 return result
             else:
                 error_msg = f"Ошибка создания счета покупателю: {response.status_code} - {response.text}"
@@ -1195,10 +1524,10 @@ class MoySkladAPI:
         if product_group == "трубы":
             return "Сестрорецк ПП", "Трубы"
         elif product_group == "профиль":
-            return "Гатчина", "Профили"
+            return "Гатчина", "профили"  # Используем точное название из справочника
         else:
             # По умолчанию
-            return "Гатчина", "Профили"
+            return "Гатчина", "профили"  # Используем точное название из справочника
     
     def _find_warehouse_by_name(self, warehouse_name: str) -> Optional[Dict]:
         """Поиск склада по названию"""

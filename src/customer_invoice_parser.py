@@ -193,46 +193,44 @@ class CustomerInvoiceParser:
         """Парсинг товарных позиций"""
         items = []
         
-        # Сначала собираем информацию о товарах
-        products = {}
+        # Ищем товары в документе
         product_elements = tree.findall('.//cm:Товар', ns)
+        logger.debug(f"Найдено товаров: {len(product_elements)}")
         
-        for product in product_elements:
-            product_name = self._get_text(product.find('cm:Наименование', ns))
-            product_article = self._get_text(product.find('cm:Артикул', ns))
-            
-            # Ищем ID товара в реквизитах
-            product_id = None
-            requisites = product.find('cm:ЗначенияРеквизитов', ns)
-            if requisites is not None:
-                for req in requisites.findall('cm:ЗначениеРеквизита', ns):
-                    req_name = self._get_text(req.find('cm:Наименование', ns))
-                    req_value = self._get_text(req.find('cm:Значение', ns))
-                    
-                    if req_name == "Для1С_Идентификатор":
-                        product_id = req_value.replace('##', '') if req_value else None
-                        break
-            
-            # Если ID не найден в реквизитах, используем название как ключ
-            if not product_id:
-                product_id = product_name
-            
-            if product_id:
-                products[product_id] = {
-                    'name': product_name,
-                    'article': product_article
-                }
-        
-        logger.debug(f"Найдено товаров: {len(products)}")
-        for pid, pinfo in products.items():
-            logger.debug(f"  {pid}: {pinfo['name']} (артикул: {pinfo['article']})")
-        
-        # Теперь ищем табличную часть
+        # Сначала пробуем извлечь данные из табличной части
         table_part = doc.find('cm:ТабличнаяЧасть', ns)
         if table_part is not None:
             logger.debug("Найдена табличная часть")
             rows = table_part.findall('cm:СтрокаТабличнойЧасти', ns)
             logger.debug(f"Найдено строк в табличной части: {len(rows)}")
+            
+            # Создаем словарь товаров для поиска по ID
+            products = {}
+            for product in product_elements:
+                product_name = self._get_text(product.find('cm:Наименование', ns))
+                product_article = self._get_text(product.find('cm:Артикул', ns))
+                
+                # Ищем ID товара в реквизитах
+                product_id = None
+                requisites = product.find('cm:ЗначенияРеквизитов', ns)
+                if requisites is not None:
+                    for req in requisites.findall('cm:ЗначениеРеквизита', ns):
+                        req_name = self._get_text(req.find('cm:Наименование', ns))
+                        req_value = self._get_text(req.find('cm:Значение', ns))
+                        
+                        if req_name == "Для1С_Идентификатор":
+                            product_id = req_value.replace('##', '') if req_value else None
+                            break
+                
+                # Если ID не найден в реквизитах, используем название как ключ
+                if not product_id:
+                    product_id = product_name
+                
+                if product_id:
+                    products[product_id] = {
+                        'name': product_name,
+                        'article': product_article
+                    }
             
             for i, row in enumerate(rows, 1):
                 logger.debug(f"Обрабатываю строку {i}")
@@ -279,26 +277,66 @@ class CustomerInvoiceParser:
         else:
             logger.debug("Табличная часть не найдена")
         
-        # Если табличная часть не найдена или пуста, создаем позиции из товаров
-        if not items and products:
-            logger.warning("Табличная часть не найдена или пуста, создаю позиции из списка товаров")
+        # Если табличная часть не найдена или пуста, извлекаем данные напрямую из элементов Товар
+        if not items and product_elements:
+            logger.warning("Табличная часть не найдена или пуста, извлекаю данные из элементов Товар")
             
-            # Пытаемся извлечь количество и цену из общей суммы
-            price_per_item = total_sum / len(products) if products else Decimal('0')
-            
-            for i, (product_id, product_info) in enumerate(products.items(), 1):
+            for i, product in enumerate(product_elements, 1):
+                product_name = self._get_text(product.find('cm:Наименование', ns))
+                product_article = self._get_text(product.find('cm:Артикул', ns))
+                
+                # Извлекаем цену, количество и сумму напрямую из элемента Товар
+                price_str = self._get_text(product.find('cm:ЦенаЗаЕдиницу', ns))
+                quantity_str = self._get_text(product.find('cm:Количество', ns))
+                sum_str = self._get_text(product.find('cm:Сумма', ns))
+                
+                logger.debug(f"Товар {i}: {product_name}")
+                logger.debug(f"  ЦенаЗаЕдиницу: {price_str}")
+                logger.debug(f"  Количество: {quantity_str}")
+                logger.debug(f"  Сумма: {sum_str}")
+                
+                # Извлекаем информацию о налогах
+                vat_rate_str = "20%"  # По умолчанию
+                vat_amount = Decimal('0')
+                
+                taxes = product.find('cm:Налоги', ns)
+                if taxes is not None:
+                    tax = taxes.find('cm:Налог', ns)
+                    if tax is not None:
+                        vat_rate_element = tax.find('cm:Ставка', ns)
+                        vat_sum_element = tax.find('cm:Сумма', ns)
+                        
+                        if vat_rate_element is not None and vat_rate_element.text:
+                            vat_rate_str = f"{vat_rate_element.text}%"
+                        
+                        if vat_sum_element is not None and vat_sum_element.text:
+                            vat_amount = Decimal(vat_sum_element.text)
+                
+                # Преобразуем в числа
+                quantity = Decimal(quantity_str) if quantity_str else Decimal('1')
+                price = Decimal(price_str) if price_str else Decimal('0')
+                amount_without_vat = Decimal(sum_str) if sum_str else Decimal('0')
+                
+                # Вычисляем сумму без НДС (если НДС учтен в сумме)
+                if vat_amount > 0:
+                    amount_without_vat = amount_without_vat - vat_amount
+                
+                amount_with_vat = amount_without_vat + vat_amount
+                
                 item = InvoiceItem(
                     line_number=i,
-                    name=product_info.get('name', f'Товар {i}'),
-                    quantity=Decimal('1'),
-                    price=price_per_item,
-                    amount_without_vat=price_per_item,
-                    vat_rate="20%",
-                    vat_amount=price_per_item * Decimal('0.2'),
-                    amount_with_vat=price_per_item * Decimal('1.2'),
-                    article=product_info.get('article')
+                    name=product_name or f'Товар {i}',
+                    quantity=quantity,
+                    price=price,
+                    amount_without_vat=amount_without_vat,
+                    vat_rate=vat_rate_str,
+                    vat_amount=vat_amount,
+                    amount_with_vat=amount_with_vat,
+                    article=product_article
                 )
+                
                 items.append(item)
+                logger.debug(f"Позиция {i}: {product_name}, артикул: {product_article}, цена: {price}, количество: {quantity}, сумма: {amount_with_vat}")
         
         logger.info(f"Распарсено позиций: {len(items)}")
         return items
