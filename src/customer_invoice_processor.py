@@ -241,10 +241,10 @@ class CustomerInvoiceProcessor:
         if product_group == "трубы":
             return "Сестрорецк ПП", "Трубы"
         elif product_group == "профиль":
-            return "Гатчина", "Профили"
+            return "Гатчина", "профили"  # Используем точное название из справочника
         else:
             # По умолчанию
-            return "Гатчина", "Профили"
+            return "Гатчина", "профили"  # Используем точное название из справочника
     
     def _cleanup_temp_files(self, zip_path: str):
         """Очистка временных файлов"""

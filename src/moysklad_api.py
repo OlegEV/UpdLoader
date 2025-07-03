@@ -804,10 +804,13 @@ class MoySkladAPI:
             return None
     
     def _find_product(self, product_name: str) -> Optional[Dict]:
-        """Поиск существующего товара по имени"""
+        """Поиск существующего товара по имени с информацией о группе"""
         try:
             search_url = f"{self.base_url}/entity/product"
-            params = {"filter": f"name={product_name}"}
+            params = {
+                "filter": f"name={product_name}",
+                "expand": "productFolder"
+            }
             response = self._make_request('GET', search_url, params=params)
             
             if response.status_code == 200:
@@ -824,10 +827,13 @@ class MoySkladAPI:
             return None
     
     def _find_product_by_article(self, article: str) -> Optional[Dict]:
-        """Поиск существующего товара по артикулу"""
+        """Поиск существующего товара по артикулу с информацией о группе"""
         try:
             search_url = f"{self.base_url}/entity/product"
-            params = {"filter": f"article={article}"}
+            params = {
+                "filter": f"article={article}",
+                "expand": "productFolder"
+            }
             response = self._make_request('GET', search_url, params=params)
             
             if response.status_code == 200:
@@ -1018,23 +1024,57 @@ class MoySkladAPI:
             raise MoySkladAPIError(error_msg)
     
     def _determine_main_warehouse_for_order(self, customer_invoice_doc: CustomerInvoiceDocument) -> Optional[Dict]:
-        """Определяет основной склад для заказа на основе товаров"""
+        """Определяет основной склад для заказа на основе групп товаров из МойСклад"""
         try:
             warehouses = self._get_warehouses()
             if not warehouses:
                 logger.warning("Склады не найдены")
-                return None
+                raise MoySkladAPIError("Склады не найдены в МойСклад")
             
-            # Подсчитываем товары по группам
+            # Подсчитываем товары по группам на основе данных из МойСклад
             profile_count = 0
             tube_count = 0
             
             for item in customer_invoice_doc.items:
-                item_name = item.name.lower()
-                if 'профиль' in item_name:
-                    profile_count += 1
-                elif 'труб' in item_name:
-                    tube_count += 1
+                # Сначала ищем товар в МойСклад
+                product = None
+                if item.article:
+                    logger.debug(f"Ищем товар по артикулу: {item.article}")
+                    product = self._find_product_by_article(item.article)
+                
+                # Если не найден по артикулу, ищем по названию
+                if not product:
+                    logger.debug(f"Ищем товар по названию: {item.name}")
+                    product = self._find_product(item.name)
+                
+                if product:
+                    # Получаем группу товара из МойСклад
+                    group_name = self._get_product_group_name(product)
+                    logger.debug(f"Товар '{item.name}' принадлежит группе: {group_name}")
+                    
+                    # Определяем склад на основе названия группы
+                    if group_name and 'профиль' in group_name.lower():
+                        profile_count += 1
+                        logger.debug(f"Товар '{item.name}' отнесен к группе профилей")
+                    elif group_name and 'труб' in group_name.lower():
+                        tube_count += 1
+                        logger.debug(f"Товар '{item.name}' отнесен к группе труб")
+                    else:
+                        # Если группа не определена, используем старую логику по названию товара
+                        logger.debug(f"Группа товара '{item.name}' не определена, используем анализ названия")
+                        item_name = item.name.lower()
+                        if 'профиль' in item_name:
+                            profile_count += 1
+                        elif 'труб' in item_name:
+                            tube_count += 1
+                else:
+                    # Если товар не найден в МойСклад, используем старую логику
+                    logger.warning(f"Товар '{item.name}' не найден в МойСклад, используем анализ названия")
+                    item_name = item.name.lower()
+                    if 'профиль' in item_name:
+                        profile_count += 1
+                    elif 'труб' in item_name:
+                        tube_count += 1
             
             # Определяем основной склад
             target_warehouse_name = None
@@ -1045,9 +1085,9 @@ class MoySkladAPI:
                 target_warehouse_name = "Сестрорецк ПП"
                 logger.info(f"Больше труб ({tube_count}), выбираем склад Сестрорецк ПП")
             else:
-                # Если равное количество или нет подходящих товаров, берем первый склад
-                logger.info(f"Равное количество товаров или нет подходящих, берем первый склад")
-                return warehouses[0] if warehouses else None
+                # Если равное количество или нет подходящих товаров, выбираем Гатчина по умолчанию
+                target_warehouse_name = "Гатчина"
+                logger.info(f"Равное количество товаров или нет подходящих, выбираем склад 'Гатчина' по умолчанию")
             
             # Ищем склад по названию
             for warehouse in warehouses:
@@ -1055,41 +1095,80 @@ class MoySkladAPI:
                     logger.info(f"Найден склад: {warehouse.get('name')}")
                     return warehouse
             
-            # Если не найден нужный склад, берем первый
-            logger.warning(f"Склад '{target_warehouse_name}' не найден, берем первый доступный")
-            return warehouses[0] if warehouses else None
+            # Если не найден нужный склад, выдаем ошибку
+            error_msg = f"Склад '{target_warehouse_name}' не найден в МойСклад"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
             
+        except MoySkladAPIError:
+            # Перебрасываем ошибки MoySkladAPIError как есть
+            raise
         except Exception as e:
-            logger.error(f"Ошибка определения склада: {e}")
-            return None
+            error_msg = f"Ошибка определения склада: {e}"
+            logger.error(error_msg)
+            raise MoySkladAPIError(error_msg)
 
     def _determine_main_project_for_order(self, customer_invoice_doc: CustomerInvoiceDocument) -> Optional[Dict]:
-        """Определяет основной проект для заказа на основе товаров"""
+        """Определяет основной проект для заказа на основе групп товаров из МойСклад"""
         try:
             projects = self._get_projects()
             if not projects:
                 logger.warning("Проекты не найдены")
                 return None
             
-            # Подсчитываем товары по группам
+            # Подсчитываем товары по группам на основе данных из МойСклад
             profile_count = 0
             tube_count = 0
             
             for item in customer_invoice_doc.items:
-                item_name = item.name.lower()
-                if 'профиль' in item_name:
-                    profile_count += 1
-                elif 'труб' in item_name:
-                    tube_count += 1
+                # Сначала ищем товар в МойСклад
+                product = None
+                if item.article:
+                    logger.debug(f"Ищем товар по артикулу: {item.article}")
+                    product = self._find_product_by_article(item.article)
+                
+                # Если не найден по артикулу, ищем по названию
+                if not product:
+                    logger.debug(f"Ищем товар по названию: {item.name}")
+                    product = self._find_product(item.name)
+                
+                if product:
+                    # Получаем группу товара из МойСклад
+                    group_name = self._get_product_group_name(product)
+                    logger.debug(f"Товар '{item.name}' принадлежит группе: {group_name}")
+                    
+                    # Определяем проект на основе названия группы
+                    if group_name and 'профиль' in group_name.lower():
+                        profile_count += 1
+                        logger.debug(f"Товар '{item.name}' отнесен к группе профилей")
+                    elif group_name and 'труб' in group_name.lower():
+                        tube_count += 1
+                        logger.debug(f"Товар '{item.name}' отнесен к группе труб")
+                    else:
+                        # Если группа не определена, используем старую логику по названию товара
+                        logger.debug(f"Группа товара '{item.name}' не определена, используем анализ названия")
+                        item_name = item.name.lower()
+                        if 'профиль' in item_name:
+                            profile_count += 1
+                        elif 'труб' in item_name:
+                            tube_count += 1
+                else:
+                    # Если товар не найден в МойСклад, используем старую логику
+                    logger.warning(f"Товар '{item.name}' не найден в МойСклад, используем анализ названия")
+                    item_name = item.name.lower()
+                    if 'профиль' in item_name:
+                        profile_count += 1
+                    elif 'труб' in item_name:
+                        tube_count += 1
             
             # Определяем основной проект
             target_project_name = None
             if profile_count > tube_count:
-                target_project_name = "профили"  # Используем точное название из справочника
+                target_project_name = "профили"
                 logger.info(f"Больше профилей ({profile_count}), выбираем проект 'профили'")
             elif tube_count > profile_count:
                 target_project_name = "Трубы"
-                logger.info(f"Больше труб ({tube_count}), выбираем проект Трубы")
+                logger.info(f"Больше труб ({tube_count}), выбираем проект 'Трубы'")
             else:
                 # Если равное количество или нет подходящих товаров, выбираем профили по умолчанию
                 target_project_name = "профили"
@@ -1145,6 +1224,44 @@ class MoySkladAPI:
         except Exception as e:
             logger.debug(f"Ошибка получения проектов: {e}")
             return []
+
+    def _get_product_group_name(self, product: Dict) -> Optional[str]:
+        """Получение названия группы товара из МойСклад, включая pathName"""
+        try:
+            # Проверяем есть ли группа в самом товаре
+            product_group = product.get('productFolder')
+            if not product_group:
+                logger.debug(f"У товара '{product.get('name', 'без названия')}' нет группы")
+                return None
+            
+            # Если группа есть, но это только мета-ссылка, получаем полную информацию
+            if isinstance(product_group, dict) and 'meta' in product_group and 'href' in product_group['meta']:
+                group_url = product_group['meta']['href']
+                logger.debug(f"Получаем полную информацию о группе товара по ссылке: {group_url}")
+                
+                group_response = self._make_request('GET', group_url)
+                if group_response.status_code == 200:
+                    group_data = group_response.json()
+                    
+                    # Получаем pathName если есть, иначе используем name
+                    group_name = group_data.get('pathName') or group_data.get('name')
+                    logger.debug(f"Получено название группы: {group_name} (pathName: {group_data.get('pathName')}, name: {group_data.get('name')})")
+                    return group_name
+                else:
+                    logger.warning(f"Ошибка получения информации о группе: {group_response.status_code}")
+                    return None
+            elif isinstance(product_group, dict):
+                # Если группа уже содержит полную информацию
+                group_name = product_group.get('pathName') or product_group.get('name')
+                logger.debug(f"Группа товара из кэша: {group_name}")
+                return group_name
+            else:
+                logger.warning(f"Неожиданный формат группы товара: {type(product_group)}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения группы товара: {e}")
+            return None
 
     def _create_customer_order(self, customer_invoice_doc: CustomerInvoiceDocument, organization: Dict, counterparty: Dict) -> Dict:
         """Создание заказа покупателя"""
@@ -1513,38 +1630,75 @@ class MoySkladAPI:
         return comment
     
     def _determine_product_group(self, product_name: str, product_article: Optional[str]) -> str:
-        """Определение группы товара по названию и артикулу"""
-        # Приводим к нижнему регистру для поиска
-        name_lower = product_name.lower() if product_name else ""
-        article_lower = product_article.lower() if product_article else ""
-        
-        # Ключевые слова для определения группы "трубы"
-        tube_keywords = ["труба", "трубы", "трубка", "трубный", "трубопровод"]
-        
-        # Ключевые слова для определения группы "профиль"
-        profile_keywords = ["профиль", "профили", "профильный", "профилированный"]
-        
-        # Проверяем название товара
-        for keyword in tube_keywords:
-            if keyword in name_lower:
+        """Определение группы товара на основе данных из МойСклад"""
+        try:
+            # Сначала ищем товар в МойСклад
+            product = None
+            if product_article:
+                logger.debug(f"Ищем товар по артикулу: {product_article}")
+                product = self._find_product_by_article(product_article)
+            
+            # Если не найден по артикулу, ищем по названию
+            if not product:
+                logger.debug(f"Ищем товар по названию: {product_name}")
+                product = self._find_product(product_name)
+            
+            if product:
+                # Получаем группу товара из МойСклад
+                group_name = self._get_product_group_name(product)
+                logger.debug(f"Товар '{product_name}' принадлежит группе: {group_name}")
+                
+                if group_name:
+                    # Определяем группу на основе названия группы из МойСклад
+                    group_lower = group_name.lower()
+                    if 'профиль' in group_lower:
+                        return "профиль"
+                    elif 'труб' in group_lower:
+                        return "трубы"
+            
+            # Если товар не найден в МойСклад или группа не определена, используем старую логику
+            logger.debug(f"Товар '{product_name}' не найден в МойСклад или группа не определена, используем анализ названия")
+            
+            # Приводим к нижнему регистру для поиска
+            name_lower = product_name.lower() if product_name else ""
+            article_lower = product_article.lower() if product_article else ""
+            
+            # Ключевые слова для определения группы "трубы"
+            tube_keywords = ["труба", "трубы", "трубка", "трубный", "трубопровод"]
+            
+            # Ключевые слова для определения группы "профиль"
+            profile_keywords = ["профиль", "профили", "профильный", "профилированный"]
+            
+            # Проверяем название товара
+            for keyword in tube_keywords:
+                if keyword in name_lower:
+                    return "трубы"
+            
+            for keyword in profile_keywords:
+                if keyword in name_lower:
+                    return "профиль"
+            
+            # Проверяем артикул
+            for keyword in tube_keywords:
+                if keyword in article_lower:
+                    return "трубы"
+            
+            for keyword in profile_keywords:
+                if keyword in article_lower:
+                    return "профиль"
+            
+            # По умолчанию возвращаем "профиль"
+            logger.debug(f"Группа товара не определена для '{product_name}' (артикул: {product_article}), используем 'профиль'")
+            return "профиль"
+            
+        except Exception as e:
+            logger.error(f"Ошибка определения группы товара: {e}")
+            # В случае ошибки используем старую логику
+            name_lower = product_name.lower() if product_name else ""
+            if 'труб' in name_lower:
                 return "трубы"
-        
-        for keyword in profile_keywords:
-            if keyword in name_lower:
+            else:
                 return "профиль"
-        
-        # Проверяем артикул
-        for keyword in tube_keywords:
-            if keyword in article_lower:
-                return "трубы"
-        
-        for keyword in profile_keywords:
-            if keyword in article_lower:
-                return "профиль"
-        
-        # По умолчанию возвращаем "профиль"
-        logger.debug(f"Группа товара не определена для '{product_name}' (артикул: {product_article}), используем 'профиль'")
-        return "профиль"
     
     def _get_warehouse_and_project_for_group(self, product_group: str) -> tuple[str, str]:
         """Получение склада и проекта для группы товара"""
