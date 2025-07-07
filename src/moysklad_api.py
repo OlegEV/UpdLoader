@@ -1180,10 +1180,8 @@ class MoySkladAPI:
                 if target_project_name.lower() == project_name:
                     logger.info(f"Найден проект: {project.get('name')}")
                     return project
-            
-            # Если не найден нужный проект, берем первый
-            logger.warning(f"Проект '{target_project_name}' не найден, берем первый доступный")
-            return projects[0] if projects else None
+
+            return None
             
         except Exception as e:
             logger.error(f"Ошибка определения проекта: {e}")
