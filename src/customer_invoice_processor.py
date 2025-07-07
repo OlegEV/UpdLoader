@@ -239,7 +239,7 @@ class CustomerInvoiceProcessor:
     def _get_warehouse_and_project_for_group(self, product_group: str) -> tuple[str, str]:
         """Получение склада и проекта для группы товара"""
         if product_group == "трубы":
-            return "Сестрорецк ПП", "Трубы"
+            return "Сестрорецк, ПП", "Трубы"
         elif product_group == "профиль":
             return "Гатчина", "профили"  # Используем точное название из справочника
         else:

@@ -1082,8 +1082,8 @@ class MoySkladAPI:
                 target_warehouse_name = "Гатчина"
                 logger.info(f"Больше профилей ({profile_count}), выбираем склад Гатчина")
             elif tube_count > profile_count:
-                target_warehouse_name = "Сестрорецк ПП"
-                logger.info(f"Больше труб ({tube_count}), выбираем склад Сестрорецк ПП")
+                target_warehouse_name = "Сестрорецк, ПП"
+                logger.info(f"Больше труб ({tube_count}), выбираем склад Сестрорецк, ПП")
             else:
                 # Если равное количество или нет подходящих товаров, выбираем Гатчина по умолчанию
                 target_warehouse_name = "Гатчина"
@@ -1655,55 +1655,18 @@ class MoySkladAPI:
                         return "профиль"
                     elif 'труб' in group_lower:
                         return "трубы"
-            
-            # Если товар не найден в МойСклад или группа не определена, используем старую логику
-            logger.debug(f"Товар '{product_name}' не найден в МойСклад или группа не определена, используем анализ названия")
-            
-            # Приводим к нижнему регистру для поиска
-            name_lower = product_name.lower() if product_name else ""
-            article_lower = product_article.lower() if product_article else ""
-            
-            # Ключевые слова для определения группы "трубы"
-            tube_keywords = ["труба", "трубы", "трубка", "трубный", "трубопровод"]
-            
-            # Ключевые слова для определения группы "профиль"
-            profile_keywords = ["профиль", "профили", "профильный", "профилированный"]
-            
-            # Проверяем название товара
-            for keyword in tube_keywords:
-                if keyword in name_lower:
-                    return "трубы"
-            
-            for keyword in profile_keywords:
-                if keyword in name_lower:
-                    return "профиль"
-            
-            # Проверяем артикул
-            for keyword in tube_keywords:
-                if keyword in article_lower:
-                    return "трубы"
-            
-            for keyword in profile_keywords:
-                if keyword in article_lower:
-                    return "профиль"
-            
-            # По умолчанию возвращаем "профиль"
-            logger.debug(f"Группа товара не определена для '{product_name}' (артикул: {product_article}), используем 'профиль'")
-            return "профиль"
+
+            logger.debug(f"Товар '{product_name}' не найден в МойСклад или группа не определена")
+            return None
             
         except Exception as e:
             logger.error(f"Ошибка определения группы товара: {e}")
-            # В случае ошибки используем старую логику
-            name_lower = product_name.lower() if product_name else ""
-            if 'труб' in name_lower:
-                return "трубы"
-            else:
-                return "профиль"
+            return None
     
     def _get_warehouse_and_project_for_group(self, product_group: str) -> tuple[str, str]:
         """Получение склада и проекта для группы товара"""
         if product_group == "трубы":
-            return "Сестрорецк ПП", "Трубы"
+            return "Сестрорецк, ПП", "Трубы"
         elif product_group == "профиль":
             return "Гатчина", "профили"  # Используем точное название из справочника
         else:
