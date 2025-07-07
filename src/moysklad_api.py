@@ -1177,7 +1177,7 @@ class MoySkladAPI:
             # Ищем проект по названию (регистронезависимый поиск)
             for project in projects:
                 project_name = project.get('name', '').lower()
-                if target_project_name.lower() in project_name or project_name in target_project_name.lower():
+                if target_project_name.lower() == project_name:
                     logger.info(f"Найден проект: {project.get('name')}")
                     return project
             
