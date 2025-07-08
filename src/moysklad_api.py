@@ -1418,12 +1418,7 @@ class MoySkladAPI:
         missing_items = []
         
         for item in customer_invoice_doc.items:
-            # Определяем группу товара по названию и артикулу
-            product_group = self._determine_product_group(item.name, item.article)
-            
-            # Определяем склад и проект на основе группы товара
-            warehouse_name, project_name = self._get_warehouse_and_project_for_group(product_group)
-            
+
             # Ищем товар в МойСклад
             product = None
             if item.article:
@@ -1447,17 +1442,6 @@ class MoySkladAPI:
                 # Цена в копейках
                 price_kopecks = int(float(item.price) * 100)
                 
-                # Ищем склад по названию
-                warehouse = self._find_warehouse_by_name(warehouse_name)
-                if not warehouse:
-                    logger.warning(f"Склад '{warehouse_name}' не найден, используем основной склад")
-                    warehouse = self._get_main_warehouse()
-                
-                # Ищем проект по названию
-                project = self._find_project_by_name(project_name)
-                if not project:
-                    logger.warning(f"Проект '{project_name}' не найден")
-                
                 position = {
                     "quantity": float(item.quantity),
                     "price": price_kopecks,
@@ -1467,24 +1451,8 @@ class MoySkladAPI:
                     "vat": self._get_vat_rate(item.vat_rate)
                 }
                 
-                # Добавляем склад если найден
-                if warehouse:
-                    position["store"] = {
-                        "meta": warehouse["meta"]
-                    }
-                    logger.info(f"Товар '{item.name}' → склад '{warehouse.get('name', 'без названия')}'")
-                
-                # Добавляем проект если найден
-                if project:
-                    position["project"] = {
-                        "meta": project["meta"]
-                    }
-                    logger.info(f"Товар '{item.name}' → проект '{project.get('name', 'без названия')}'")
-                
                 positions.append(position)
-                
-                # Логируем итоговое назначение
-                logger.info(f"Позиция: {item.name} (группа: {product_group}) → склад: {warehouse_name}, проект: {project_name}")
+                logger.info(f"Позиция: {item.name}")
             else:
                 missing_items.append(f"{item.name} (артикул: {item.article or 'не указан'})")
         
