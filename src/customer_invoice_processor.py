@@ -123,37 +123,46 @@ class CustomerInvoiceProcessor:
         if not self.moysklad_api.verify_token():
             raise MoySkladAPIError("Неверный токен МойСклад API")
         
-        # Создаем заказ покупателя
+        # Создаем заказ покупателя и счет покупателю
         return self.moysklad_api.create_customer_order_and_invoice(customer_invoice_doc)
     
     def _create_success_result(self, customer_invoice_doc: CustomerInvoiceDocument, moysklad_result: dict) -> ProcessingResult:
         """Создание результата успешной обработки"""
         customer_order = moysklad_result.get('customer_order', {})
+        customer_invoice = moysklad_result.get('customer_invoice', {})
         
         order_id = customer_order.get('id')
         order_name = customer_order.get('name', 'Не указано')
+        invoice_id = customer_invoice.get('id')
+        invoice_name = customer_invoice.get('name', 'Не указано')
         
         # Получаем URL документов
         order_url = None
         invoice_url = None
         if order_id:
             order_url = self.moysklad_api.get_customer_order_url(order_id)
+        if invoice_id:
+            invoice_url = self.moysklad_api.get_customer_invoice_url(invoice_id)
         
         # Формируем детальное сообщение
-        message = self._format_success_message(customer_invoice_doc, order_name, order_url)
+        message = self._format_success_message(customer_invoice_doc, order_name, order_url, invoice_name, invoice_url)
         
         return ProcessingResult(
             success=True,
-            message=message
+            message=message,
+            moysklad_invoice_id=invoice_id,
+            moysklad_invoice_url=invoice_url
         )
     
     def _format_success_message(self, customer_invoice_doc: CustomerInvoiceDocument, 
-                               order_name: str, order_url: Optional[str]) -> str:
+                               order_name: str, order_url: Optional[str],
+                               invoice_name: str, invoice_url: Optional[str]) -> str:
         """Форматирование сообщения об успешной обработке"""
         message = "✅ Счет покупателю успешно обработан и загружен в МойСклад!\n\n"
         
         # Информация о созданных документах
         message += f"📋 Заказ покупателя: {order_name}\n"
+        message += f"💰 Счет покупателю: {invoice_name}\n"
         message += f"📅 Дата: {customer_invoice_doc.invoice_date.strftime('%d.%m.%Y')}\n\n"
         
         # Информация об участниках
@@ -189,6 +198,8 @@ class CustomerInvoiceProcessor:
         message += "🔗 Ссылки в МойСклад:\n"
         if order_url:
             message += f"• Заказ покупателя: {order_url}\n"
+        if invoice_url:
+            message += f"• Счет покупателю: {invoice_url}\n"
         
         return message
     

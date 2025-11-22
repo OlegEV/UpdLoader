@@ -129,33 +129,46 @@ class UPDProcessor:
     def _create_success_result(self, upd_document: UPDDocument, invoice_result: dict) -> ProcessingResult:
         """Создание результата успешной обработки"""
         # Новая структура ответа содержит factureout и demand
+        factureout = invoice_result.get('factureout', {})
         demand = invoice_result.get('demand', {})
         
+        invoice_id = factureout.get('id')
+        invoice_name = factureout.get('name', 'Не указано')
         demand_id = demand.get('id')
         demand_name = demand.get('name', 'Не указано')
         
         # Получаем URL документов
         invoice_url = None
         demand_url = None
+        if invoice_id:
+            invoice_url = self.moysklad_api.get_invoice_url(invoice_id)
         if demand_id:
             demand_url = self.moysklad_api.get_demand_url(demand_id)
         
         # Формируем детальное сообщение
-        message = self._format_success_message(upd_document, demand_name, demand_url, invoice_result)
+        message = self._format_success_message(upd_document, invoice_name, invoice_url, demand_name, demand_url, invoice_result)
         
         return ProcessingResult(
             success=True,
             message=message,
-            upd_document=upd_document
+            upd_document=upd_document,
+            moysklad_invoice_id=invoice_id,
+            moysklad_invoice_url=invoice_url
         )
     
-    def _format_success_message(self, upd_document: UPDDocument, demand_name: str,
+    def _format_success_message(self, upd_document: UPDDocument, invoice_name: str,
+                               invoice_url: Optional[str], demand_name: str,
                                demand_url: Optional[str], invoice_result: dict) -> str:
         """Форматирование сообщения об успешной обработке"""
         content = upd_document.content
         
         message = "✅ УПД успешно обработан и загружен в МойСклад!\n\n"
-
+        
+        # Информация о созданных документах
+        message += f"📄 Счет-фактура: {invoice_name}\n"
+        message += f"📦 Отгрузка: {demand_name}\n"
+        message += f" Дата: {content.invoice_date.strftime('%d.%m.%Y')}\n\n"
+        
         # Информация об участниках
         message += f"🏢 Поставщик: {content.seller.name}"
         if content.seller.inn:
@@ -166,15 +179,22 @@ class UPDProcessor:
         if content.buyer.inn:
             message += f" (ИНН: {content.buyer.inn})"
         message += "\n\n"
-
-        # Информация о созданных документах
-        message += f" Дата: {content.invoice_date.strftime('%d.%m.%Y')}\n\n"
-        message += f"📦 Отгрузка: {demand_name}\n"
+        
+        # Финансовая информация
+        if content.total_with_vat > 0:
+            message += f"💰 Сумма без НДС: {content.total_without_vat:,.2f} ₽\n"
+            message += f"🧾 НДС: {content.total_vat:,.2f} ₽\n"
+            message += f"💵 Итого с НДС: {content.total_with_vat:,.2f} ₽\n\n"
         
         # Ссылки на документы
         message += "🔗 Ссылки в МойСклад:\n"
+        if invoice_url:
+            message += f"• Счет-фактура: {invoice_url}\n"
         if demand_url:
             message += f"• Отгрузка: {demand_url}\n"
+        
+        if upd_document.meta_info.doc_flow_id:
+            message += f"\n🆔 ID документооборота: {upd_document.meta_info.doc_flow_id}"
         
         return message
     
