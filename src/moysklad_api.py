@@ -264,34 +264,13 @@ class MoySkladAPI:
             # Шаг 1: Создаем отгрузку (документ-основание)
             logger.info("Создаю отгрузку как документ-основание...")
             demand = self._create_demand(upd_document, supplier_org, buyer_counterparty)
-            
-            # Шаг 2: Создаем счет-фактуру на основе отгрузки
-            logger.info("Создаю счет-фактуру на основе отгрузки...")
-            invoice_data = self._map_upd_to_factureout(upd_document, supplier_org, buyer_counterparty, demand)
-            
-            # Создаем счет-фактуру выданную
-            url = f"{self.base_url}/entity/factureout"
-            response = self._make_request('POST', url, json_data=invoice_data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"Счет-фактура успешно создан: {result.get('id')}")
-                return {
-                    "factureout": result,
-                    "demand": demand,
-                    "success": True
-                }
-            else:
-                error_msg = f"Ошибка создания счета-фактуры: {response.status_code} - {response.text}"
-                logger.error(error_msg)
-                raise MoySkladAPIError(error_msg)
                 
         except requests.RequestException as e:
-            error_msg = f"Сетевая ошибка при создании счета-фактуры: {e}"
+            error_msg = f"Сетевая ошибка при создании отгрузки: {e}"
             logger.error(error_msg)
             raise MoySkladAPIError(error_msg)
         except Exception as e:
-            error_msg = f"Неожиданная ошибка при создании счета-фактуры: {e}"
+            error_msg = f"Неожиданная ошибка при создании отгрузки: {e}"
             logger.error(error_msg)
             raise MoySkladAPIError(error_msg)
     
@@ -1007,14 +986,9 @@ class MoySkladAPI:
             logger.info("Создаю заказ покупателя...")
             customer_order = self._create_customer_order(customer_invoice_doc, seller_org, buyer_counterparty)
             
-            # Шаг 2: Создаем счет покупателю с привязкой к заказу
-            logger.info("Создаю счет покупателю с привязкой к заказу...")
-            customer_invoice = self._create_customer_invoice(customer_invoice_doc, seller_org, buyer_counterparty, customer_order)
-            
-            logger.info(f"Документы успешно созданы: заказ {customer_order.get('id')}, счет {customer_invoice.get('id')}")
+            logger.info(f"Документы успешно созданы: заказ {customer_order.get('id')}")
             return {
                 "customer_order": customer_order,
-                "customer_invoice": customer_invoice,
                 "success": True
             }
             
