@@ -1,9 +1,7 @@
 """
 Процессор счетов покупателю в формате CommerceML
 """
-import os
-import tempfile
-from typing import Optional, Dict
+from typing import Optional
 
 from loguru import logger
 
@@ -11,14 +9,16 @@ from src.config import Config
 from src.models import ProcessingResult
 from src.customer_invoice_parser import CustomerInvoiceParser, CustomerInvoiceParsingError, CustomerInvoiceDocument
 from src.moysklad_api import MoySkladAPI, MoySkladAPIError
+from src.processors.base_processor import BaseDocumentProcessor
+from src.utils.product_utils import determine_product_group, get_warehouse_and_project_for_group
 
 
-class CustomerInvoiceProcessor:
+class CustomerInvoiceProcessor(BaseDocumentProcessor):
     """Основной класс для обработки счетов покупателю"""
     
     def __init__(self):
+        super().__init__()
         self.parser = CustomerInvoiceParser()
-        self.moysklad_api = MoySkladAPI()
     
     def process_customer_invoice_file(self, file_content: bytes, filename: str) -> ProcessingResult:
         """
@@ -36,21 +36,10 @@ class CustomerInvoiceProcessor:
         try:
             logger.info(f"Начинаю обработку счета покупателю: {filename}")
             
-            # Проверяем размер файла
-            if len(file_content) > Config.MAX_FILE_SIZE:
-                return ProcessingResult(
-                    success=False,
-                    message=f"❌ Файл слишком большой. Максимальный размер: {Config.MAX_FILE_SIZE // 1024 // 1024} МБ",
-                    error_code="FILE_TOO_LARGE"
-                )
-            
-            # Проверяем расширение файла
-            if not filename.lower().endswith('.zip'):
-                return ProcessingResult(
-                    success=False,
-                    message="❌ Поддерживаются только ZIP архивы со счетами покупателю",
-                    error_code="INVALID_FILE_TYPE"
-                )
+            # Проверяем размер файла и расширение
+            validation_result = self._validate_file(file_content, filename, "счета покупателю")
+            if validation_result:
+                return validation_result
             
             # Создаем временный файл
             Config.ensure_temp_dir()
@@ -66,49 +55,18 @@ class CustomerInvoiceProcessor:
             return self._create_success_result(customer_invoice_doc, moysklad_result)
             
         except CustomerInvoiceParsingError as e:
-            logger.error(f"Ошибка парсинга счета покупателю: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Ошибка обработки счета покупателю:\n{str(e)}",
-                error_code="PARSING_ERROR"
-            )
+            return self._handle_parsing_error(e, "счета покупателю")
             
         except MoySkladAPIError as e:
-            logger.error(f"Ошибка МойСклад API: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Ошибка загрузки в МойСклад:\n{str(e)}",
-                error_code="MOYSKLAD_API_ERROR"
-            )
+            return self._handle_api_error(e)
             
         except Exception as e:
-            logger.error(f"Неожиданная ошибка обработки счета покупателю: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Неожиданная ошибка:\n{str(e)}",
-                error_code="UNEXPECTED_ERROR"
-            )
+            return self._handle_unexpected_error(e)
             
         finally:
             # Очищаем временные файлы
             if temp_zip_path:
                 self._cleanup_temp_files(temp_zip_path)
-    
-    def _save_temp_file(self, file_content: bytes, filename: str) -> str:
-        """Сохранение временного файла"""
-        temp_file = tempfile.NamedTemporaryFile(
-            dir=Config.TEMP_DIR,
-            suffix='.zip',
-            delete=False
-        )
-        
-        try:
-            temp_file.write(file_content)
-            temp_file.flush()
-            logger.debug(f"Временный файл сохранен: {temp_file.name}")
-            return temp_file.name
-        finally:
-            temp_file.close()
     
     def _parse_customer_invoice(self, zip_path: str) -> CustomerInvoiceDocument:
         """Парсинг счета покупателю"""
@@ -184,8 +142,8 @@ class CustomerInvoiceProcessor:
         message += "🎯 Распределение товаров:\n"
         for item in customer_invoice_doc.items:
             # Определяем группу товара
-            product_group = self._determine_product_group(item.name, item.article)
-            warehouse_name, project_name = self._get_warehouse_and_project_for_group(product_group)
+            product_group = determine_product_group(item.name, item.article)
+            warehouse_name, project_name = get_warehouse_and_project_for_group(product_group)
             
             message += f"• {item.name}"
             if item.article:
@@ -203,72 +161,3 @@ class CustomerInvoiceProcessor:
         
         return message
     
-    def _determine_product_group(self, product_name: str, product_article: Optional[str]) -> str:
-        """Определение группы товара по названию и артикулу"""
-        # Приводим к нижнему регистру для поиска
-        name_lower = product_name.lower() if product_name else ""
-        article_lower = product_article.lower() if product_article else ""
-        
-        # Ключевые слова для определения группы "трубы"
-        tube_keywords = ["труба", "трубы", "трубка", "трубный", "трубопровод"]
-        
-        # Ключевые слова для определения группы "профиль"
-        profile_keywords = ["профиль", "профили", "профильный", "профилированный"]
-        
-        # Проверяем название товара
-        for keyword in tube_keywords:
-            if keyword in name_lower:
-                return "трубы"
-        
-        for keyword in profile_keywords:
-            if keyword in name_lower:
-                return "профиль"
-        
-        # Проверяем артикул
-        for keyword in tube_keywords:
-            if keyword in article_lower:
-                return "трубы"
-        
-        for keyword in profile_keywords:
-            if keyword in article_lower:
-                return "профиль"
-        
-        # По умолчанию возвращаем "профиль"
-        return "профиль"
-    
-    def _get_warehouse_and_project_for_group(self, product_group: str) -> tuple[str, str]:
-        """Получение склада и проекта для группы товара"""
-        if product_group == "трубы":
-            return "Сестрорецк, ПП", "Трубы"
-        elif product_group == "профиль":
-            return "Гатчина", "профили"  # Используем точное название из справочника
-        else:
-            # По умолчанию
-            return "Гатчина", "профили"  # Используем точное название из справочника
-    
-    def _cleanup_temp_files(self, zip_path: str):
-        """Очистка временных файлов"""
-        try:
-            self.parser.cleanup_temp_files(zip_path)
-        except Exception as e:
-            logger.error(f"Ошибка очистки временных файлов: {e}")
-    
-    def check_moysklad_connection(self) -> bool:
-        """Проверка подключения к МойСклад"""
-        try:
-            return self.moysklad_api.verify_token()
-        except Exception as e:
-            logger.error(f"Ошибка проверки подключения к МойСклад: {e}")
-            return False
-    
-    def get_moysklad_status(self) -> Dict:
-        """Получение детального статуса МойСклад API"""
-        try:
-            return self.moysklad_api.verify_api_access()
-        except Exception as e:
-            logger.error(f"Ошибка получения статуса МойСклад: {e}")
-            return {
-                "success": False,
-                "error": f"Ошибка получения статуса: {e}",
-                "details": "Проверьте настройки API"
-            }

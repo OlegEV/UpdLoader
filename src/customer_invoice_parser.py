@@ -2,7 +2,6 @@
 Парсер счетов покупателю в формате CommerceML
 """
 import os
-import zipfile
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List
@@ -12,6 +11,8 @@ from loguru import logger
 
 from src.config import Config
 from src.models import InvoiceItem, Organization
+from src.parsers.base_parser import BaseDocumentParser
+from src.utils.xml_utils import safe_get_text
 
 
 class CustomerInvoiceParsingError(Exception):
@@ -21,8 +22,8 @@ class CustomerInvoiceParsingError(Exception):
 
 class CustomerInvoiceDocument:
     """Документ счета покупателю"""
-    def __init__(self, invoice_number: str, invoice_date: datetime, 
-                 seller: Organization, buyer: Organization, 
+    def __init__(self, invoice_number: str, invoice_date: datetime,
+                 seller: Organization, buyer: Organization,
                  items: List[InvoiceItem], total_sum: Decimal):
         self.invoice_number = invoice_number
         self.invoice_date = invoice_date
@@ -32,11 +33,8 @@ class CustomerInvoiceDocument:
         self.total_sum = total_sum
 
 
-class CustomerInvoiceParser:
+class CustomerInvoiceParser(BaseDocumentParser):
     """Парсер счетов покупателю в формате CommerceML"""
-    
-    def __init__(self):
-        self.encoding = Config.UPD_ENCODING
     
     def parse_customer_invoice_archive(self, zip_path: str) -> CustomerInvoiceDocument:
         """
@@ -72,17 +70,7 @@ class CustomerInvoiceParser:
     
     def _extract_archive(self, zip_path: str) -> str:
         """Извлечение ZIP архива"""
-        extract_dir = os.path.join(Config.TEMP_DIR, "customer_invoice_extract")
-        
-        try:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-            
-            logger.debug(f"Архив извлечен в: {extract_dir}")
-            return extract_dir
-            
-        except zipfile.BadZipFile:
-            raise CustomerInvoiceParsingError("Неверный формат ZIP файла")
+        return super()._extract_archive(zip_path, "customer_invoice_extract")
     
     def _find_invoice_xml(self, extract_dir: str) -> str:
         """Поиск основного XML файла счета"""
@@ -341,24 +329,6 @@ class CustomerInvoiceParser:
         logger.info(f"Распарсено позиций: {len(items)}")
         return items
     
-    def _get_text(self, element: Optional[ET.Element]) -> Optional[str]:
-        """Безопасное извлечение текста из элемента"""
-        return element.text.strip() if element is not None and element.text else None
-    
     def cleanup_temp_files(self, zip_path: str):
         """Очистка временных файлов"""
-        try:
-            # Удаляем исходный ZIP файл
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-            
-            # Удаляем извлеченные файлы
-            extract_dir = os.path.join(Config.TEMP_DIR, "customer_invoice_extract")
-            if os.path.exists(extract_dir):
-                import shutil
-                shutil.rmtree(extract_dir)
-                
-            logger.debug("Временные файлы счета покупателю очищены")
-            
-        except Exception as e:
-            logger.error(f"Ошибка очистки временных файлов счета покупателю: {e}")
+        super().cleanup_temp_files(zip_path, "customer_invoice_extract")

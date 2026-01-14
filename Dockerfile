@@ -1,5 +1,5 @@
 # Используем Alpine Linux для минимального размера образа
-FROM python:3.11-alpine
+FROM python:3.12-alpine
 
 # Устанавливаем рабочую директорию
 WORKDIR /app

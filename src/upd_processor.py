@@ -1,8 +1,6 @@
 """
 Основной процессор УПД документов
 """
-import os
-import tempfile
 from typing import Optional, Dict
 
 from loguru import logger
@@ -11,14 +9,15 @@ from .config import Config
 from .models import ProcessingResult, UPDDocument
 from .upd_parser import UPDParser, UPDParsingError
 from .moysklad_api import MoySkladAPI, MoySkladAPIError
+from .processors.base_processor import BaseDocumentProcessor
 
 
-class UPDProcessor:
+class UPDProcessor(BaseDocumentProcessor):
     """Основной класс для обработки УПД документов"""
     
     def __init__(self):
+        super().__init__()
         self.parser = UPDParser()
-        self.moysklad_api = MoySkladAPI()
     
     def process_upd_file(self, file_content: bytes, filename: str) -> ProcessingResult:
         """
@@ -36,21 +35,10 @@ class UPDProcessor:
         try:
             logger.info(f"Начинаю обработку УПД файла: {filename}")
             
-            # Проверяем размер файла
-            if len(file_content) > Config.MAX_FILE_SIZE:
-                return ProcessingResult(
-                    success=False,
-                    message=f"❌ Файл слишком большой. Максимальный размер: {Config.MAX_FILE_SIZE // 1024 // 1024} МБ",
-                    error_code="FILE_TOO_LARGE"
-                )
-            
-            # Проверяем расширение файла
-            if not filename.lower().endswith('.zip'):
-                return ProcessingResult(
-                    success=False,
-                    message="❌ Поддерживаются только ZIP архивы с УПД",
-                    error_code="INVALID_FILE_TYPE"
-                )
+            # Проверяем размер файла и расширение
+            validation_result = self._validate_file(file_content, filename, "УПД")
+            if validation_result:
+                return validation_result
             
             # Создаем временный файл
             Config.ensure_temp_dir()
@@ -66,49 +54,18 @@ class UPDProcessor:
             return self._create_success_result(upd_document, invoice_result)
             
         except UPDParsingError as e:
-            logger.error(f"Ошибка парсинга УПД: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Ошибка обработки УПД:\n{str(e)}",
-                error_code="PARSING_ERROR"
-            )
+            return self._handle_parsing_error(e, "УПД")
             
         except MoySkladAPIError as e:
-            logger.error(f"Ошибка МойСклад API: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Ошибка загрузки в МойСклад:\n{str(e)}",
-                error_code="MOYSKLAD_API_ERROR"
-            )
+            return self._handle_api_error(e)
             
         except Exception as e:
-            logger.error(f"Неожиданная ошибка обработки УПД: {e}")
-            return ProcessingResult(
-                success=False,
-                message=f"❌ Неожиданная ошибка:\n{str(e)}",
-                error_code="UNEXPECTED_ERROR"
-            )
+            return self._handle_unexpected_error(e)
             
         finally:
             # Очищаем временные файлы
             if temp_zip_path:
                 self._cleanup_temp_files(temp_zip_path)
-    
-    def _save_temp_file(self, file_content: bytes, filename: str) -> str:
-        """Сохранение временного файла"""
-        temp_file = tempfile.NamedTemporaryFile(
-            dir=Config.TEMP_DIR,
-            suffix='.zip',
-            delete=False
-        )
-        
-        try:
-            temp_file.write(file_content)
-            temp_file.flush()
-            logger.debug(f"Временный файл сохранен: {temp_file.name}")
-            return temp_file.name
-        finally:
-            temp_file.close()
     
     def _parse_upd(self, zip_path: str) -> UPDDocument:
         """Парсинг УПД документа"""
@@ -198,29 +155,3 @@ class UPDProcessor:
         
         return message
     
-    def _cleanup_temp_files(self, zip_path: str):
-        """Очистка временных файлов"""
-        try:
-            self.parser.cleanup_temp_files(zip_path)
-        except Exception as e:
-            logger.error(f"Ошибка очистки временных файлов: {e}")
-    
-    def check_moysklad_connection(self) -> bool:
-        """Проверка подключения к МойСклад"""
-        try:
-            return self.moysklad_api.verify_token()
-        except Exception as e:
-            logger.error(f"Ошибка проверки подключения к МойСклад: {e}")
-            return False
-    
-    def get_moysklad_status(self) -> Dict:
-        """Получение детального статуса МойСклад API"""
-        try:
-            return self.moysklad_api.verify_api_access()
-        except Exception as e:
-            logger.error(f"Ошибка получения статуса МойСклад: {e}")
-            return {
-                "success": False,
-                "error": f"Ошибка получения статуса: {e}",
-                "details": "Проверьте настройки API"
-            }
