@@ -22,50 +22,22 @@ class UPDProcessor(BaseDocumentProcessor):
     def process_upd_file(self, file_content: bytes, filename: str) -> ProcessingResult:
         """
         Обработка УПД файла
-        
+
         Args:
             file_content: Содержимое ZIP файла
             filename: Имя файла
-            
+
         Returns:
             ProcessingResult: Результат обработки
         """
-        temp_zip_path = None
-        
-        try:
-            logger.info(f"Начинаю обработку УПД файла: {filename}")
-            
-            # Проверяем размер файла и расширение
-            validation_result = self._validate_file(file_content, filename, "УПД")
-            if validation_result:
-                return validation_result
-            
-            # Создаем временный файл
-            Config.ensure_temp_dir()
-            temp_zip_path = self._save_temp_file(file_content, filename)
-            
-            # Парсим УПД
-            upd_document = self._parse_upd(temp_zip_path)
-            
-            # Загружаем в МойСклад
-            invoice_result = self._upload_to_moysklad(upd_document)
-            
-            # Формируем успешный результат
-            return self._create_success_result(upd_document, invoice_result)
-            
-        except UPDParsingError as e:
-            return self._handle_parsing_error(e, "УПД")
-            
-        except MoySkladAPIError as e:
-            return self._handle_api_error(e)
-            
-        except Exception as e:
-            return self._handle_unexpected_error(e)
-            
-        finally:
-            # Очищаем временные файлы
-            if temp_zip_path:
-                self._cleanup_temp_files(temp_zip_path)
+        return self._process_document_file(
+            file_content=file_content,
+            filename=filename,
+            doc_type_name="УПД",
+            parse_func=self._parse_upd,
+            upload_func=self._upload_to_moysklad,
+            create_result_func=self._create_success_result
+        )
     
     def _parse_upd(self, zip_path: str) -> UPDDocument:
         """Парсинг УПД документа"""

@@ -77,13 +77,13 @@ class MoySkladAPI:
             logger.warning(f"МойСклад API: {method} {log_data['url']} -> {response.status_code} ({duration_ms:.0f}ms)", extra=log_data)
     
     def _make_request(self, method: str, url: str, json_data: Optional[Dict] = None,
-                      params: Optional[Dict] = None, timeout: int = 10) -> requests.Response:
+                      params: Optional[Dict] = None, timeout: Optional[int] = 30) -> requests.Response:
         """Выполнение HTTP запроса с логированием"""
+
         start_time = time.time()
-        
+
         try:
             logger.debug(f"Отправляю {method} запрос к МойСклад: {url}")
-            
             if method.upper() == 'GET':
                 response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
             elif method.upper() == 'POST':
@@ -92,12 +92,12 @@ class MoySkladAPI:
                 response = requests.put(url, headers=self.headers, json=json_data, timeout=timeout)
             else:
                 raise ValueError(f"Неподдерживаемый HTTP метод: {method}")
-            
+
             duration_ms = (time.time() - start_time) * 1000
             self._log_request(method.upper(), url, response, duration_ms, json_data)
-            
+
             return response
-            
+
         except requests.RequestException as e:
             duration_ms = (time.time() - start_time) * 1000
             logger.error(f"МойСклад API: Сетевая ошибка {method} {url} ({duration_ms:.0f}ms): {e}")

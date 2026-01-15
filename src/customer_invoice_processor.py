@@ -23,50 +23,22 @@ class CustomerInvoiceProcessor(BaseDocumentProcessor):
     def process_customer_invoice_file(self, file_content: bytes, filename: str) -> ProcessingResult:
         """
         Обработка файла счета покупателю
-        
+
         Args:
             file_content: Содержимое ZIP файла
             filename: Имя файла
-            
+
         Returns:
             ProcessingResult: Результат обработки
         """
-        temp_zip_path = None
-        
-        try:
-            logger.info(f"Начинаю обработку счета покупателю: {filename}")
-            
-            # Проверяем размер файла и расширение
-            validation_result = self._validate_file(file_content, filename, "счета покупателю")
-            if validation_result:
-                return validation_result
-            
-            # Создаем временный файл
-            Config.ensure_temp_dir()
-            temp_zip_path = self._save_temp_file(file_content, filename)
-            
-            # Парсим счет покупателю
-            customer_invoice_doc = self._parse_customer_invoice(temp_zip_path)
-            
-            # Загружаем в МойСклад
-            moysklad_result = self._upload_to_moysklad(customer_invoice_doc)
-            
-            # Формируем успешный результат
-            return self._create_success_result(customer_invoice_doc, moysklad_result)
-            
-        except CustomerInvoiceParsingError as e:
-            return self._handle_parsing_error(e, "счета покупателю")
-            
-        except MoySkladAPIError as e:
-            return self._handle_api_error(e)
-            
-        except Exception as e:
-            return self._handle_unexpected_error(e)
-            
-        finally:
-            # Очищаем временные файлы
-            if temp_zip_path:
-                self._cleanup_temp_files(temp_zip_path)
+        return self._process_document_file(
+            file_content=file_content,
+            filename=filename,
+            doc_type_name="счета покупателю",
+            parse_func=self._parse_customer_invoice,
+            upload_func=self._upload_to_moysklad,
+            create_result_func=self._create_success_result
+        )
     
     def _parse_customer_invoice(self, zip_path: str) -> CustomerInvoiceDocument:
         """Парсинг счета покупателю"""
